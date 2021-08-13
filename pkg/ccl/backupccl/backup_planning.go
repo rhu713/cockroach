@@ -57,15 +57,16 @@ import (
 )
 
 const (
-	backupOptRevisionHistory = "revision_history"
-	backupOptEncPassphrase   = "encryption_passphrase"
-	backupOptEncKMS          = "kms"
-	backupOptWithPrivileges  = "privileges"
-	backupOptAsJSON          = "as_json"
-	backupOptWithDebugIDs    = "debug_ids"
-	backupOptIncStorage      = "incremental_storage"
-	localityURLParam         = "COCKROACH_LOCALITY"
-	defaultLocalityValue     = "default"
+	backupOptRevisionHistory  = "revision_history"
+	backupOptEncPassphrase    = "encryption_passphrase"
+	backupOptEncKMS           = "kms"
+	backupOptWithPrivileges   = "privileges"
+	backupOptAsJSON           = "as_json"
+	backupOptWithDebugIDs     = "debug_ids"
+	backupOptIncStorage       = "incremental_storage"
+	localityURLParam          = "COCKROACH_LOCALITY"
+	defaultLocalityValue      = "default"
+	backupOptDebugMetadataSST = "debug_dump_metadata_sst"
 )
 
 type tableAndIndex struct {
