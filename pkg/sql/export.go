@@ -70,6 +70,7 @@ const (
 	exportOptionChunkSize   = "chunk_size"
 	exportOptionFileName    = "filename"
 	exportOptionCompression = "compression"
+	exportOptionOnError     = "on_error"
 )
 
 var exportOptionExpectValues = map[string]KVStringOptValidate{
@@ -79,6 +80,7 @@ var exportOptionExpectValues = map[string]KVStringOptValidate{
 	exportOptionNullAs:      KVStringOptRequireValue,
 	exportOptionCompression: KVStringOptRequireValue,
 	exportOptionChunkSize:   KVStringOptRequireValue,
+	exportOptionOnError:     KVStringOptRequireValue,
 }
 
 const exportChunkSizeDefault = int64(32 << 20) // 32 MB

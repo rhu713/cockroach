@@ -88,6 +88,7 @@ const (
 	importOptionDisableGlobMatch = "disable_glob_matching"
 	importOptionSaveRejected     = "experimental_save_rejected"
 	importOptionDetached         = "detached"
+	importOptionOnError          = "on_error"
 
 	pgCopyDelimiter = "delimiter"
 	pgCopyNull      = "nullif"
@@ -134,6 +135,7 @@ var importOptionExpectValues = map[string]sql.KVStringOptValidate{
 	importOptionDecompress:   sql.KVStringOptRequireValue,
 	importOptionOversample:   sql.KVStringOptRequireValue,
 	importOptionSaveRejected: sql.KVStringOptRequireNoValue,
+	importOptionOnError:      sql.KVStringOptRequireValue,
 
 	importOptionSkipFKs:          sql.KVStringOptRequireNoValue,
 	importOptionDisableGlobMatch: sql.KVStringOptRequireNoValue,
@@ -173,7 +175,7 @@ func makeStringSet(opts ...string) map[string]struct{} {
 // Options common to all formats.
 var allowedCommonOptions = makeStringSet(
 	importOptionSSTSize, importOptionDecompress, importOptionOversample,
-	importOptionSaveRejected, importOptionDisableGlobMatch, importOptionDetached)
+	importOptionSaveRejected, importOptionDisableGlobMatch, importOptionDetached, importOptionOnError)
 
 // Format specific allowed options.
 var avroAllowedOptions = makeStringSet(

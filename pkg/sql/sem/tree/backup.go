@@ -116,6 +116,7 @@ type RestoreOptions struct {
 	SkipMissingViews          bool
 	Detached                  bool
 	SkipLocalitiesCheck       bool
+	OnError                   Expr
 }
 
 var _ NodeFormatter = &RestoreOptions{}
