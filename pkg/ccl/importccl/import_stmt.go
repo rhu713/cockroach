@@ -945,6 +945,11 @@ func importPlanHook(
 			telemetry.Count("import.into")
 		}
 
+		var onError string
+		if override, ok := opts[importOptionOnError]; ok {
+			onError = override
+		}
+
 		// Here we create the job in a side transaction and then kick off the job.
 		// This is awful. Rather we should be disallowing this statement in an
 		// explicit transaction and then we should create the job in the user's
@@ -968,6 +973,7 @@ func importPlanHook(
 			Username:    p.User(),
 			Details:     importDetails,
 			Progress:    jobspb.ImportProgress{},
+			OnError:     onError,
 		}
 
 		if isDetached {

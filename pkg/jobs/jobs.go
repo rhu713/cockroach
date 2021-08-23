@@ -104,6 +104,8 @@ type Record struct {
 	// CreatedBy, if set, annotates this record with the information on
 	// this job creator.
 	CreatedBy *CreatedByInfo
+	// OnError is the action by which this job should take after it encounters an error.
+	OnError string
 }
 
 // AppendDescription appends description to this records Description with a
@@ -204,6 +206,13 @@ const (
 	// reverting their changes. Manual cleanup is required when a job ends up in
 	// this state.
 	StatusRevertFailed Status = "revert-failed"
+)
+
+type OnErrorType string
+
+const (
+	OnErrorRevert OnErrorType = "revert"
+	OnErrorPause  OnErrorType = "pause"
 )
 
 var (

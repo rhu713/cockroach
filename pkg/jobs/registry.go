@@ -374,6 +374,7 @@ func (r *Registry) makePayload(record *Record) jobspb.Payload {
 		DescriptorIDs: record.DescriptorIDs,
 		Details:       jobspb.WrapPayloadDetails(record.Details),
 		Noncancelable: record.NonCancelable,
+		OnError:       record.OnError,
 	}
 }
 
@@ -1212,7 +1213,19 @@ func (r *Registry) stepThroughStateMachine(
 			}
 			return sErr
 		}
-		return r.stepThroughStateMachine(ctx, execCtx, resumer, job, StatusReverting, err)
+
+		onError := OnErrorType(payload.OnError)
+		switch onError {
+		case OnErrorPause:
+			const errorFmt = "job failed with error (%v) but is being paused"
+			log.Warningf(ctx, errorFmt, jobErr)
+			return r.PauseRequested(ctx, nil, job.ID(), fmt.Sprintf(errorFmt, jobErr))
+
+		default:
+			return r.stepThroughStateMachine(ctx, execCtx, resumer, job, StatusReverting, jobErr)
+		}
+
+		return err
 	case StatusPauseRequested:
 		return errors.Errorf("job %s", status)
 	case StatusCancelRequested:
