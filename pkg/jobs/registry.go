@@ -1217,9 +1217,9 @@ func (r *Registry) stepThroughStateMachine(
 		onError := OnErrorType(payload.OnError)
 		switch onError {
 		case OnErrorPause:
-			const errorFmt = "job failed with error (%v) but is being paused"
-			log.Warningf(ctx, errorFmt, jobErr)
-			return r.PauseRequested(ctx, nil, job.ID(), fmt.Sprintf(errorFmt, jobErr))
+			const errorFmt = "job failed with error (%v) but is being paused due to %s=%s setting"
+			log.Warningf(ctx, errorFmt, jobErr, onError, OnErrorPause)
+			return r.PauseRequested(ctx, nil, job.ID(), fmt.Sprintf(errorFmt, jobErr, onError, OnErrorPause))
 
 		default:
 			return r.stepThroughStateMachine(ctx, execCtx, resumer, job, StatusReverting, jobErr)
