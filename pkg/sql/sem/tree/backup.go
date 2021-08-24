@@ -41,6 +41,7 @@ type BackupOptions struct {
 	Detached                     bool
 	EncryptionKMSURI             StringOrPlaceholderOptList
 	IncludeDeprecatedInterleaves bool
+	OnError                      Expr
 }
 
 var _ NodeFormatter = &BackupOptions{}
@@ -116,6 +117,7 @@ type RestoreOptions struct {
 	SkipMissingViews          bool
 	Detached                  bool
 	SkipLocalitiesCheck       bool
+	OnError                   Expr
 }
 
 var _ NodeFormatter = &RestoreOptions{}
@@ -241,6 +243,12 @@ func (o *BackupOptions) Format(ctx *FmtCtx) {
 		maybeAddSep()
 		ctx.WriteString("include_deprecated_interleaves")
 	}
+
+	if o.OnError != nil {
+		maybeAddSep()
+		ctx.WriteString("on_error = ")
+		ctx.FormatNode(o.OnError)
+	}
 }
 
 // CombineWith merges other backup options into this backup options struct.
@@ -290,7 +298,7 @@ func (o BackupOptions) IsDefault() bool {
 	options := BackupOptions{}
 	return o.CaptureRevisionHistory == options.CaptureRevisionHistory &&
 		o.Detached == options.Detached && cmp.Equal(o.EncryptionKMSURI, options.EncryptionKMSURI) &&
-		o.EncryptionPassphrase == options.EncryptionPassphrase
+		o.EncryptionPassphrase == options.EncryptionPassphrase && o.OnError == options.OnError
 }
 
 // Format implements the NodeFormatter interface.
@@ -348,6 +356,12 @@ func (o *RestoreOptions) Format(ctx *FmtCtx) {
 	if o.SkipLocalitiesCheck {
 		maybeAddSep()
 		ctx.WriteString("skip_localities_check")
+	}
+
+	if o.OnError != nil {
+		maybeAddSep()
+		ctx.WriteString("on_error = ")
+		ctx.FormatNode(o.OnError)
 	}
 }
 

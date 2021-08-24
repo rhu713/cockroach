@@ -331,6 +331,15 @@ BACKUP TABLE foo TO '_' WITH revision_history, kms = ('_', '_') -- UNEXPECTED RE
 BACKUP TABLE _ TO 'bar' WITH revision_history, kms = ('foo', 'bar') -- identifiers removed
 
 parse
+BACKUP foo TO 'bar' WITH ON_ERROR = 'pause'
+----
+BACKUP TABLE foo TO 'bar' WITH on_error = 'pause' -- normalized!
+BACKUP TABLE (foo) TO ('bar') WITH on_error = ('pause') -- fully parenthesized
+BACKUP TABLE foo TO _ WITH on_error = _ -- literals removed
+BACKUP TABLE foo TO '_' WITH on_error = '_' -- UNEXPECTED REPARSED AST WITHOUT LITERALS
+BACKUP TABLE _ TO 'bar' WITH on_error = 'pause' -- identifiers removed
+
+parse
 BACKUP foo TO 'bar' WITH OPTIONS (detached, ENCRYPTION_PASSPHRASE = 'secret', revision_history)
 ----
 BACKUP TABLE foo TO 'bar' WITH revision_history, encryption_passphrase = '*****', detached -- normalized!

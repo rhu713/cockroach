@@ -1134,6 +1134,82 @@ func TestRegistryLifecycle(t *testing.T) {
 	})
 }
 
+func TestPauseOnFailure(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	t.Run("failed, self pause, and cancel", func(t *testing.T) {
+		rts := registryTestSuite{}
+		rts.setUp(t)
+		defer rts.tearDown()
+
+		job := rts.mockJob
+		job.OnError = jobs.OnErrorPause
+
+		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.s.DB(), job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rts.job = j
+
+		rts.mu.e.ResumeStart = true
+		rts.check(t, jobs.StatusRunning)
+
+		rts.resumeCheckCh <- struct{}{}
+		rts.resumeCh <- errors.New("resume failed")
+		rts.mu.e.ResumeExit++
+
+		rts.check(t, jobs.StatusPaused)
+
+		rts.sqlDB.Exec(t, "CANCEL JOB $1", j.ID())
+		rts.mu.e.OnFailOrCancelStart = true
+		rts.failOrCancelCheckCh <- struct{}{}
+		close(rts.failOrCancelCheckCh)
+		rts.check(t, jobs.StatusReverting)
+
+		rts.failOrCancelCh <- nil
+		rts.mu.e.OnFailOrCancelExit = true
+		close(rts.failOrCancelCh)
+		rts.check(t, jobs.StatusCanceled)
+	})
+
+	t.Run("failed, self pause, and resume", func(t *testing.T) {
+		rts := registryTestSuite{}
+		rts.setUp(t)
+		defer rts.tearDown()
+
+		job := rts.mockJob
+		job.OnError = jobs.OnErrorPause
+
+		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.s.DB(), job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rts.job = j
+
+		rts.mu.e.ResumeStart = true
+		rts.check(t, jobs.StatusRunning)
+
+		rts.resumeCheckCh <- struct{}{}
+		rts.resumeCh <- errors.New("resume failed")
+		rts.mu.e.ResumeExit++
+
+		rts.check(t, jobs.StatusPaused)
+
+		rts.sqlDB.Exec(t, "RESUME JOB $1", j.ID())
+		rts.check(t, jobs.StatusRunning)
+
+		rts.mu.e.ResumeStart = true
+		rts.resumeCheckCh <- struct{}{}
+		rts.check(t, jobs.StatusRunning)
+		rts.resumeCh <- nil
+		rts.mu.e.ResumeExit++
+
+		rts.mu.e.Success = true
+		rts.check(t, jobs.StatusSucceeded)
+	})
+}
+
 func checkTraceFiles(t *testing.T, registry *jobs.Registry, expectedNumFiles int) {
 	t.Helper()
 	// Check the configured inflight trace dir for dumped zip files.

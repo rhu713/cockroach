@@ -736,7 +736,8 @@ message Payload {
   // PauseReason is used to describe the reason that the job is currently paused
   // or has been requested to be paused.
   string pause_reason = 28;
-  // NEXT ID: 29.
+  // OnError is the action by which this job should take after it encounters an error.
+  string onError = 29;
 }
 
 message Progress {

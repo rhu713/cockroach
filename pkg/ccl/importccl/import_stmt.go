@@ -88,6 +88,7 @@ const (
 	importOptionDisableGlobMatch = "disable_glob_matching"
 	importOptionSaveRejected     = "experimental_save_rejected"
 	importOptionDetached         = "detached"
+	importOptionOnError          = "on_error"
 
 	pgCopyDelimiter = "delimiter"
 	pgCopyNull      = "nullif"
@@ -134,6 +135,7 @@ var importOptionExpectValues = map[string]sql.KVStringOptValidate{
 	importOptionDecompress:   sql.KVStringOptRequireValue,
 	importOptionOversample:   sql.KVStringOptRequireValue,
 	importOptionSaveRejected: sql.KVStringOptRequireNoValue,
+	importOptionOnError:      sql.KVStringOptRequireValue,
 
 	importOptionSkipFKs:          sql.KVStringOptRequireNoValue,
 	importOptionDisableGlobMatch: sql.KVStringOptRequireNoValue,
@@ -173,7 +175,7 @@ func makeStringSet(opts ...string) map[string]struct{} {
 // Options common to all formats.
 var allowedCommonOptions = makeStringSet(
 	importOptionSSTSize, importOptionDecompress, importOptionOversample,
-	importOptionSaveRejected, importOptionDisableGlobMatch, importOptionDetached)
+	importOptionSaveRejected, importOptionDisableGlobMatch, importOptionDetached, importOptionOnError)
 
 // Format specific allowed options.
 var avroAllowedOptions = makeStringSet(
@@ -943,6 +945,16 @@ func importPlanHook(
 			telemetry.Count("import.into")
 		}
 
+		var onError jobs.OnErrorType
+		if override, ok := opts[importOptionOnError]; ok {
+			switch jobs.OnErrorType(override) {
+			case "", jobs.OnErrorPause, jobs.OnErrorRevert:
+				onError = jobs.OnErrorType(override)
+			default:
+				return errors.Newf("option %s does not support value %q", importOptionOnError, override)
+			}
+		}
+
 		// Here we create the job in a side transaction and then kick off the job.
 		// This is awful. Rather we should be disallowing this statement in an
 		// explicit transaction and then we should create the job in the user's
@@ -966,6 +978,7 @@ func importPlanHook(
 			Username:    p.User(),
 			Details:     importDetails,
 			Progress:    jobspb.ImportProgress{},
+			OnError:     onError,
 		}
 
 		if isDetached {

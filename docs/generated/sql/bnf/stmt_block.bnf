@@ -1001,6 +1001,7 @@ unreserved_keyword ::=
 	| 'OF'
 	| 'OFF'
 	| 'OIDS'
+	| 'ON_ERROR'
 	| 'OPERATOR'
 	| 'OPT'
 	| 'OPTION'
@@ -1839,6 +1840,7 @@ backup_options ::=
 	| 'DETACHED'
 	| 'KMS' '=' string_or_placeholder_opt_list
 	| 'INCLUDE_DEPRECATED_INTERLEAVES'
+	| 'ON_ERROR' '=' string_or_placeholder
 
 c_expr ::=
 	d_expr

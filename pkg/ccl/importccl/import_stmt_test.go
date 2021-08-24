@@ -68,6 +68,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -3487,6 +3488,56 @@ func TestImportIntoCSV(t *testing.T) {
 		if result != rowsPerFile {
 			t.Fatalf("expected %d rows, got %d", rowsPerFile, result)
 		}
+	})
+
+	t.Run("import-into-with-on-error-options", func(t *testing.T) {
+		verifyOnErrorForJob := func(jobID int64, onError jobs.OnErrorType) error {
+			var payloadBytes []byte
+			sqlDB.QueryRow(
+				t, `SELECT payload FROM system.jobs WHERE id = $1`, jobID,
+			).Scan(&payloadBytes)
+			payload := &jobspb.Payload{}
+
+			if err := protoutil.Unmarshal(payloadBytes, payload); err != nil {
+				return errors.Newf("could not scan payload with jobID %d", jobID)
+			}
+
+			if jobs.OnErrorType(payload.OnError) != onError {
+				return errors.Newf("expected job %d to have onError=%s, got %s", jobID, onError, payload.OnError)
+			}
+
+			return nil
+		}
+
+		sqlDB.Exec(t, `CREATE TABLE t (a INT, b STRING)`)
+		defer sqlDB.Exec(t, `DROP TABLE t`)
+		var jobID int64
+		var unused interface{}
+
+		query := fmt.Sprintf(`IMPORT INTO t (a, b) CSV DATA (%s) WITH on_error = '$1'`,
+			strings.Join(testFiles.files, ", "))
+
+		// on_error = 'pause' should create a job with OnError pause in the payload.
+		sqlDB.QueryRow(t, query, "pause").Scan(&jobID, &unused, &unused, &unused, &unused, &unused)
+		if err := verifyOnErrorForJob(jobID, jobs.OnErrorPause); err != nil {
+			t.Fatal(err)
+		}
+
+		// on_error = 'revert' should create a job with OnError revert in the payload.
+		sqlDB.QueryRow(t, query, "revert").Scan(&jobID, &unused, &unused, &unused, &unused, &unused)
+		if err := verifyOnErrorForJob(jobID, jobs.OnErrorRevert); err != nil {
+			t.Fatal(err)
+		}
+
+		// no on_error option should create a job with empty OnError in the payload.
+		sqlDB.QueryRow(t, fmt.Sprintf(`IMPORT INTO t (a, b) CSV DATA (%s)`,
+			strings.Join(testFiles.files, ", "))).Scan(&jobID, &unused, &unused, &unused, &unused, &unused)
+		if err := verifyOnErrorForJob(jobID, ""); err != nil {
+			t.Fatal(err)
+		}
+
+		// other values of on_error should throw an error.
+		sqlDB.ExpectErr(t, "option on_error does not support value", query, "invalidOnError")
 	})
 }
 
@@ -7107,4 +7158,421 @@ CSV DATA ($1)
 			})
 		}
 	}
+}
+
+// TODO(adityamaru): Tests still need to be added incrementally as
+// relevant IMPORT INTO logic is added. Some of them include:
+// -> FK and constraint violation
+// -> CSV containing keys which will shadow existing data
+// -> Rollback of a failed IMPORT INTO
+func TestImportIntoCSV2(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	skip.UnderShort(t)
+	skip.UnderRace(t, "takes >1min under race")
+
+	const nodes = 3
+
+	numFiles := nodes + 2
+	rowsPerFile := 1000
+	rowsPerRaceFile := 16
+
+	ctx := context.Background()
+	baseDir := testutils.TestDataPath(t, "csv")
+	tc := testcluster.StartTestCluster(t, nodes, base.TestClusterArgs{ServerArgs: base.TestServerArgs{ExternalIODir: baseDir}})
+	defer tc.Stopper().Stop(ctx)
+	conn := tc.Conns[0]
+
+	var forceFailure bool
+	var importBodyFinished chan struct{}
+	var delayImportFinish chan struct{}
+
+	for i := range tc.Servers {
+		tc.Servers[i].JobRegistry().(*jobs.Registry).TestingResumerCreationKnobs = map[jobspb.Type]func(raw jobs.Resumer) jobs.Resumer{
+			jobspb.TypeImport: func(raw jobs.Resumer) jobs.Resumer {
+				r := raw.(*importResumer)
+				r.testingKnobs.afterImport = func(_ backupccl.RowCount) error {
+					if importBodyFinished != nil {
+						importBodyFinished <- struct{}{}
+					}
+					if delayImportFinish != nil {
+						<-delayImportFinish
+					}
+
+					if forceFailure {
+						return errors.New("testing injected failure")
+					}
+					return nil
+				}
+				return r
+			},
+		}
+	}
+
+	sqlDB := sqlutils.MakeSQLRunner(conn)
+
+	sqlDB.Exec(t, `SET CLUSTER SETTING kv.bulk_ingest.batch_size = '10KB'`)
+
+	testFiles := makeCSVData(t, numFiles, rowsPerFile, nodes, rowsPerRaceFile)
+	if util.RaceEnabled {
+		// This test takes a while with the race detector, so reduce the number of
+		// files and rows per file in an attempt to speed it up.
+		numFiles = nodes
+		rowsPerFile = rowsPerRaceFile
+	}
+
+	empty := []string{"'nodelocal://0/empty.csv'"}
+
+	// Support subtests by keeping track of the number of jobs that are executed.
+	testNum := -1
+	insertedRows := numFiles * rowsPerFile
+
+	for _, tc := range []struct {
+		name    string
+		query   string // must have one `%s` for the files list.
+		files   []string
+		jobOpts string
+		err     string
+	}{
+		{
+			"simple-import-into",
+			`IMPORT INTO t (a, b) CSV DATA (%s)`,
+			testFiles.files,
+			``,
+			"",
+		},
+		{
+			"import-into-with-opts",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH delimiter = '|', comment = '#', nullif='', skip = '2'`,
+			testFiles.filesWithOpts,
+			` WITH comment = '#', delimiter = '|', "nullif" = '', skip = '2'`,
+			"",
+		},
+		{
+			// Force some SST splits.
+			"import-into-sstsize",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH sstsize = '10K'`,
+			testFiles.files,
+			` WITH sstsize = '10K'`,
+			"",
+		},
+		{
+			"empty-file",
+			`IMPORT INTO t (a, b) CSV DATA (%s)`,
+			empty,
+			``,
+			"",
+		},
+		{
+			"empty-with-files",
+			`IMPORT INTO t (a, b) CSV DATA (%s)`,
+			append(empty, testFiles.files...),
+			``,
+			"",
+		},
+		{
+			"import-into-auto-decompress",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'auto'`,
+			testFiles.files,
+			` WITH decompress = 'auto'`,
+			"",
+		},
+		{
+			"import-into-no-decompress",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'none'`,
+			testFiles.files,
+			` WITH decompress = 'none'`,
+			"",
+		},
+		{
+			"import-into-explicit-gzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'gzip'`,
+			testFiles.gzipFiles,
+			` WITH decompress = 'gzip'`,
+			"",
+		},
+		{
+			"import-into-auto-gzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'auto'`,
+			testFiles.gzipFiles,
+			` WITH decompress = 'auto'`,
+			"",
+		},
+		{
+			"import-into-implicit-gzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s)`,
+			testFiles.gzipFiles,
+			``,
+			"",
+		},
+		{
+			"import-into-explicit-bzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'bzip'`,
+			testFiles.bzipFiles,
+			` WITH decompress = 'bzip'`,
+			"",
+		},
+		{
+			"import-into-auto-bzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'auto'`,
+			testFiles.bzipFiles,
+			` WITH decompress = 'auto'`,
+			"",
+		},
+		{
+			"import-into-implicit-bzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s)`,
+			testFiles.bzipFiles,
+			``,
+			"",
+		},
+		{
+			"import-into-no-decompress-wildcard",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'none'`,
+			testFiles.filesUsingWildcard,
+			` WITH decompress = 'none'`,
+			"",
+		},
+		{
+			"import-into-explicit-gzip-wildcard",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'gzip'`,
+			testFiles.gzipFilesUsingWildcard,
+			` WITH decompress = 'gzip'`,
+			"",
+		},
+		{
+			"import-into-auto-bzip-wildcard",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'auto'`,
+			testFiles.gzipFilesUsingWildcard,
+			` WITH decompress = 'auto'`,
+			"",
+		},
+		// NB: successes above, failures below, because we check the i-th job.
+		{
+			"import-into-bad-opt-name",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH foo = 'bar'`,
+			testFiles.files,
+			``,
+			"invalid option \"foo\"",
+		},
+		{
+			"import-into-no-database",
+			`IMPORT INTO nonexistent.t (a, b) CSV DATA (%s)`,
+			testFiles.files,
+			``,
+			`database does not exist: "nonexistent.t"`,
+		},
+		{
+			"import-into-no-table",
+			`IMPORT INTO g (a, b) CSV DATA (%s)`,
+			testFiles.files,
+			``,
+			`pq: relation "g" does not exist`,
+		},
+		{
+			"import-into-no-decompress-gzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'none'`,
+			testFiles.gzipFiles,
+			` WITH decompress = 'none'`,
+			// This returns different errors for `make test` and `make testrace` but
+			// field is in both error messages.
+			"field",
+		},
+		{
+			"import-into-no-decompress-gzip",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'gzip'`,
+			testFiles.files,
+			` WITH decompress = 'gzip'`,
+			"gzip: invalid header",
+		},
+		{
+			"import-no-files-match-wildcard",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH decompress = 'auto'`,
+			[]string{`'nodelocal://0/data-[0-9][0-9]*'`},
+			` WITH decompress = 'auto'`,
+			`pq: no files matched`,
+		},
+		{
+			"import-into-no-glob-wildcard",
+			`IMPORT INTO t (a, b) CSV DATA (%s) WITH disable_glob_matching`,
+			testFiles.filesUsingWildcard,
+			` WITH disable_glob_matching`,
+			"pq: (.+) no such file or directory",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(tc.name, "bzip") && len(testFiles.bzipFiles) == 0 {
+				skip.IgnoreLint(t, "bzip2 not available on PATH?")
+			}
+			sqlDB.Exec(t, `CREATE TABLE t (a INT, b STRING)`)
+			defer sqlDB.Exec(t, `DROP TABLE t`)
+
+			var tableID int64
+			sqlDB.QueryRow(t, `SELECT id FROM system.namespace WHERE name = 't'`).Scan(&tableID)
+
+			var unused string
+			var restored struct {
+				rows, idx, bytes int
+			}
+
+			// Insert the test data
+			insert := []string{"''", "'text'", "'a'", "'e'", "'l'", "'t'", "'z'"}
+			numExistingRows := len(insert)
+
+			for i, v := range insert {
+				sqlDB.Exec(t, "INSERT INTO t (a, b) VALUES ($1, $2)", i, v)
+			}
+
+			var result int
+			query := fmt.Sprintf(tc.query, strings.Join(tc.files, ", "))
+			testNum++
+			if tc.err != "" {
+				sqlDB.ExpectErr(t, tc.err, query)
+				return
+			}
+
+			sqlDB.QueryRow(t, query).Scan(
+				&unused, &unused, &unused, &restored.rows, &restored.idx, &restored.bytes,
+			)
+
+			jobPrefix := `IMPORT INTO defaultdb.public.t(a, b)`
+			if err := jobutils.VerifySystemJob(t, sqlDB, testNum, jobspb.TypeImport, jobs.StatusSucceeded, jobs.Record{
+				Username:      security.RootUserName(),
+				Description:   fmt.Sprintf(jobPrefix+` CSV DATA (%s)`+tc.jobOpts, strings.ReplaceAll(strings.Join(tc.files, ", "), "?AWS_SESSION_TOKEN=secrets", "?AWS_SESSION_TOKEN=redacted")),
+				DescriptorIDs: []descpb.ID{descpb.ID(tableID)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			isEmpty := len(tc.files) == 1 && tc.files[0] == empty[0]
+			if isEmpty {
+				sqlDB.QueryRow(t, `SELECT count(*) FROM t`).Scan(&result)
+				if result != numExistingRows {
+					t.Fatalf("expected %d rows, got %d", numExistingRows, result)
+				}
+				return
+			}
+
+			if expected, actual := insertedRows, restored.rows; expected != actual {
+				t.Fatalf("expected %d rows, got %d", expected, actual)
+			}
+
+			// Verify correct number of rows via COUNT.
+			sqlDB.QueryRow(t, `SELECT count(*) FROM t`).Scan(&result)
+			if expect := numExistingRows + insertedRows; result != expect {
+				t.Fatalf("expected %d rows, got %d", expect, result)
+			}
+
+			// Verify correct number of NULLs via COUNT.
+			sqlDB.QueryRow(t, `SELECT count(*) FROM t WHERE b IS NULL`).Scan(&result)
+			expectedNulls := 0
+			if strings.Contains(tc.query, "nullif") {
+				expectedNulls = insertedRows / 4
+			}
+			if result != expectedNulls {
+				t.Fatalf("expected %d rows, got %d", expectedNulls, result)
+			}
+		})
+	}
+
+	// Verify unique_rowid is replaced for tables without primary keys.
+	t.Run("import-into-unique_rowid", func(t *testing.T) {
+		sqlDB.Exec(t, `CREATE TABLE t (a INT, b STRING)`)
+		defer sqlDB.Exec(t, `DROP TABLE t`)
+
+		// Insert the test data
+		insert := []string{"''", "'text'", "'a'", "'e'", "'l'", "'t'", "'z'"}
+		numExistingRows := len(insert)
+
+		for i, v := range insert {
+			sqlDB.Exec(t, "INSERT INTO t (a, b) VALUES ($1, $2)", i, v)
+		}
+
+		sqlDB.Exec(t, fmt.Sprintf(`IMPORT INTO t (a, b) CSV DATA (%s)`, strings.Join(testFiles.files, ", ")))
+		// Verify the rowids are being generated as expected.
+		sqlDB.CheckQueryResults(t,
+			`SELECT count(*) FROM t`,
+			sqlDB.QueryStr(t, `
+			SELECT count(*) + $3 FROM
+			(SELECT * FROM
+				(SELECT generate_series(0, $1 - 1) file),
+				(SELECT generate_series(1, $2) rownum)
+			)
+			`, numFiles, rowsPerFile, numExistingRows),
+		)
+	})
+
+	// Verify a failed IMPORT INTO won't prevent a subsequent IMPORT INTO.
+	t.Run("import-into-checkpoint-leftover", func(t *testing.T) {
+		sqlDB.Exec(t, `CREATE TABLE t (a INT PRIMARY KEY, b STRING)`)
+		defer sqlDB.Exec(t, `DROP TABLE t`)
+
+		// Insert the test data
+		insert := []string{"''", "'text'", "'a'", "'e'", "'l'", "'t'", "'z'"}
+
+		for i, v := range insert {
+			sqlDB.Exec(t, "INSERT INTO t (a, b) VALUES ($1, $2)", i, v)
+		}
+
+		// Hit a failure during import.
+		forceFailure = true
+		sqlDB.ExpectErr(
+			t, `testing injected failure`,
+			fmt.Sprintf(`IMPORT INTO t (a, b) CSV DATA (%s)`, testFiles.files[1]),
+		)
+		forceFailure = false
+
+		// Expect it to succeed on re-attempt.
+		sqlDB.Exec(t, fmt.Sprintf(`IMPORT INTO t (a, b) CSV DATA (%s)`, testFiles.files[1]))
+	})
+
+	// Verify that during IMPORT INTO the table is offline.
+	t.Run("offline-state", func(t *testing.T) {
+		sqlDB.Exec(t, `CREATE TABLE t (a INT PRIMARY KEY, b STRING)`)
+		defer sqlDB.Exec(t, `DROP TABLE t`)
+
+		// Insert the test data
+		insert := []string{"''", "'text'", "'a'", "'e'", "'l'", "'t'", "'z'"}
+
+		for i, v := range insert {
+			sqlDB.Exec(t, "INSERT INTO t (a, b) VALUES ($1, $2)", i, v)
+		}
+
+		// Hit a failure during import.
+		importBodyFinished = make(chan struct{})
+		delayImportFinish = make(chan struct{})
+		defer func() {
+			importBodyFinished = nil
+			delayImportFinish = nil
+		}()
+
+		var unused interface{}
+
+		var jobID int
+		g := ctxgroup.WithContext(ctx)
+		g.GoCtx(func(ctx context.Context) error {
+			defer close(importBodyFinished)
+			return sqlDB.DB.QueryRowContext(ctx, fmt.Sprintf(`IMPORT INTO t (a, b) CSV DATA (%s)`,
+				testFiles.files[1])).Scan(&jobID, &unused, &unused, &unused, &unused, &unused)
+		})
+		g.GoCtx(func(ctx context.Context) error {
+			defer close(delayImportFinish)
+			<-importBodyFinished
+
+			err := sqlDB.DB.QueryRowContext(ctx, `SELECT 1 FROM t`).Scan(&unused)
+			if !testutils.IsError(err, `relation "t" is offline: importing`) {
+				return err
+			}
+			return nil
+		})
+		if err := g.Wait(); err != nil {
+			t.Fatal(err)
+		}
+		waitForJobResult(t, tc, jobspb.JobID(jobID), jobs.StatusSucceeded)
+
+		// Expect it to succeed on re-attempt.
+		sqlDB.QueryRow(t, `SELECT 1 FROM t`).Scan(&unused)
+	})
+
 }

@@ -778,6 +778,18 @@ func backupPlanHook(
 		encryptionParams.encryptMode = kms
 	}
 
+	if backupStmt.Options.OnError != nil {
+		fn, err := p.TypeAsString(ctx, backupStmt.Options.OnError, "BACKUP")
+		if err != nil {
+			return nil, nil, nil, false, err
+		}
+		_, err = fn()
+		if err != nil {
+			return nil, nil, nil, false, err
+		}
+
+	}
+
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		// TODO(dan): Move this span into sql.
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
