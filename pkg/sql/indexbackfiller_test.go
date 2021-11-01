@@ -105,7 +105,6 @@ func TestIndexBackfiller(t *testing.T) {
 	// The sequence of events here exactly matches the test cases in
 	// docs/tech-notes/index-backfill.md. If you update this, please remember to
 	// update the tech note as well.
-
 	execOrFail("CREATE DATABASE t")
 	execOrFail("CREATE TABLE t.kv (k int PRIMARY KEY, v char)")
 	execOrFail("INSERT INTO t.kv VALUES (1, 'a'), (3, 'c'), (4, 'e'), (6, 'f'), (7, 'g'), (9, 'h')")
@@ -254,6 +253,7 @@ INSERT INTO foo VALUES (1, 2), (2, 3), (3, 4);
 				require.NoError(t, mut.AddIndexMutation(
 					&indexToBackfill, descpb.DescriptorMutation_ADD,
 				))
+				require.NoError(t, mut.AllocateIDs(context.Background()))
 			},
 		},
 		// This test will inject a new primary index and perform a primary key swap
@@ -337,6 +337,7 @@ INSERT INTO foo VALUES (1), (10), (100);
 				require.NoError(t, mut.AddIndexMutation(
 					&indexToBackfill, descpb.DescriptorMutation_ADD,
 				))
+				require.NoError(t, mut.AllocateIDs(context.Background()))
 				mut.AddPrimaryKeySwapMutation(&descpb.PrimaryKeySwap{
 					OldPrimaryIndexId: 1,
 					NewPrimaryIndexId: 2,

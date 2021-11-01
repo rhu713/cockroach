@@ -2042,17 +2042,48 @@ func (desc *Mutable) AddComputedColumnSwapMutation(swap *descpb.ComputedColumnSw
 func (desc *Mutable) addMutation(m descpb.DescriptorMutation) {
 	switch m.Direction {
 	case descpb.DescriptorMutation_ADD:
-		m.State = descpb.DescriptorMutation_DELETE_ONLY
-
+		switch m.Descriptor_.(type) {
+		case *descpb.DescriptorMutation_Index:
+			m.State = descpb.DescriptorMutation_BACKFILLING
+		default:
+			m.State = descpb.DescriptorMutation_DELETE_ONLY
+		}
 	case descpb.DescriptorMutation_DROP:
 		m.State = descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY
 	}
+	desc.addMutationWithNextID(m)
+
+	// If we are adding an index, we add another mutation for the
+	// temporary index used by the index backfiller.
+	//
+	// The index backfiller code currently assumes that it can
+	// always find the temporary indexes in the Mutations array,
+	// in same order as the adding indexes.
+	if idxMut, ok := m.Descriptor_.(*descpb.DescriptorMutation_Index); ok {
+		if m.Direction == descpb.DescriptorMutation_ADD {
+			tempIndex := *protoutil.Clone(idxMut.Index).(*descpb.IndexDescriptor)
+			tempIndex.UseDeletePreservingEncoding = true
+			tempIndex.ID = 0
+			tempIndex.Name = ""
+			tempIndex.Unique = false
+			m2 := descpb.DescriptorMutation{
+				Descriptor_: &descpb.DescriptorMutation_Index{Index: &tempIndex},
+				Direction:   descpb.DescriptorMutation_ADD,
+				State:       descpb.DescriptorMutation_DELETE_ONLY,
+			}
+			desc.addMutationWithNextID(m2)
+		}
+	}
+}
+
+func (desc *Mutable) addMutationWithNextID(m descpb.DescriptorMutation) {
 	// For tables created in the same transaction the next mutation ID will
 	// not have been allocated and the added mutation will use an invalid ID.
 	// This is fine because the mutation will be processed immediately.
 	m.MutationID = desc.ClusterVersion.NextMutationID
 	desc.NextMutationID = desc.ClusterVersion.NextMutationID + 1
 	desc.Mutations = append(desc.Mutations, m)
+
 }
 
 // MakeFirstMutationPublic implements the TableDescriptor interface.

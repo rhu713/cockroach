@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -218,21 +219,17 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 			if err := resetTestData(); err != nil {
 				t.Fatalf("error while resetting test data %s", err)
 			}
-
 			delEncRevisions, delEncPrefix, err := getRevisionsForTest(test.setupSQL, test.schemaChangeSQL, test.dataSQL, true)
 			if err != nil {
 				t.Fatalf("error while getting delete encoding revisions %s", err)
 			}
-
 			if err := resetTestData(); err != nil {
 				t.Fatalf("error while resetting test data %s", err)
 			}
-
 			defaultRevisions, defaultPrefix, err := getRevisionsForTest(test.setupSQL, test.schemaChangeSQL, test.dataSQL, false)
 			if err != nil {
 				t.Fatalf("error while getting default revisions %s", err)
 			}
-
 			err = compareRevisionHistories(defaultRevisions, len(defaultPrefix), delEncRevisions, len(delEncPrefix))
 			if err != nil {
 				t.Fatal(err)
@@ -371,7 +368,7 @@ func TestMergeProcess(t *testing.T) {
 			name: "unique index",
 			setupSQL: `CREATE DATABASE d;
    CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b), 
+		UNIQUE INDEX idx (b),
 		UNIQUE INDEX idx_temp (b)
 );`,
 			srcIndex: "idx_temp",
@@ -400,7 +397,7 @@ func TestMergeProcess(t *testing.T) {
 			name: "unique index noop delete",
 			setupSQL: `CREATE DATABASE d;
    CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b), 
+		UNIQUE INDEX idx (b),
 		UNIQUE INDEX idx_temp (b)
 );`,
 			srcIndex: "idx_temp",
@@ -426,7 +423,7 @@ func TestMergeProcess(t *testing.T) {
 			name: "index with overriding values",
 			setupSQL: `CREATE DATABASE d;
    CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b), 
+		UNIQUE INDEX idx (b),
 		UNIQUE INDEX idx_temp (b)
 );`,
 			srcIndex:   "idx_temp",
@@ -521,8 +518,8 @@ func TestMergeProcess(t *testing.T) {
 		if err := changer.Merge(context.Background(),
 			codec,
 			tableDesc,
-			srcIndex,
-			dstIndex); err != nil {
+			srcIndex.GetID(),
+			dstIndex.GetID(), hlc.Timestamp{}); err != nil {
 			t.Fatal(err)
 		}
 

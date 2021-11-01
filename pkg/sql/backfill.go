@@ -255,9 +255,13 @@ func (sc *SchemaChanger) runBackfill(ctx context.Context) error {
 		if m.Adding() {
 			if col := m.AsColumn(); col != nil {
 				needColumnBackfill = catalog.ColumnNeedsBackfill(col)
-			} else if idx := m.AsIndex(); idx != nil {
+			} else if idx := m.AsIndex(); idx != nil && idx.Backfilling() {
 				addedIndexSpans = append(addedIndexSpans, tableDesc.IndexSpan(sc.execCfg.Codec, idx.GetID()))
 				addedIndexes = append(addedIndexes, idx.GetID())
+			} else if idx := m.AsIndex(); idx != nil && !idx.Backfilling() {
+				// temporary index, the backfiller
+				// uses these and will move them to
+				// dropping when it is done.
 			} else if c := m.AsConstraint(); c != nil {
 				isValidating := false
 				if c.IsCheck() {
@@ -887,7 +891,7 @@ func (sc *SchemaChanger) distIndexBackfill(
 	targetSpans []roachpb.Span,
 	addedIndexes []descpb.IndexID,
 	filter backfill.MutationFilter,
-) error {
+) (hlc.Timestamp, error) {
 
 	// Variables to track progress of the index backfill.
 	origNRanges := -1
@@ -897,19 +901,21 @@ func (sc *SchemaChanger) distIndexBackfill(
 	// Gather the initial resume spans for the table.
 	var todoSpans []roachpb.Span
 	var mutationIdx int
+	var readAsOf hlc.Timestamp
+
 	if err := sc.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		var err error
 		todoSpans, _, mutationIdx, err = rowexec.GetResumeSpans(
 			ctx, sc.jobRegistry, txn, sc.execCfg.Codec, sc.descID, sc.mutationID, filter)
 		return err
 	}); err != nil {
-		return err
+		return readAsOf, err
 	}
 
 	log.VEventf(ctx, 2, "indexbackfill: initial resume spans %+v", todoSpans)
 
 	if todoSpans == nil {
-		return nil
+		return readAsOf, nil
 	}
 
 	writeAsOf := sc.job.Details().(jobspb.SchemaChangeDetails).WriteTimestamp
@@ -917,7 +923,7 @@ func (sc *SchemaChanger) distIndexBackfill(
 		if err := sc.job.RunningStatus(ctx, nil /* txn */, func(_ context.Context, _ jobspb.Details) (jobs.RunningStatus, error) {
 			return jobs.RunningStatus("scanning target index for in-progress transactions"), nil
 		}); err != nil {
-			return errors.Wrapf(err, "failed to update running status of job %d", errors.Safe(sc.job.ID()))
+			return readAsOf, errors.Wrapf(err, "failed to update running status of job %d", errors.Safe(sc.job.ID()))
 		}
 		writeAsOf = sc.clock.Now()
 		log.Infof(ctx, "starting scan of target index as of %v...", writeAsOf)
@@ -943,7 +949,7 @@ func (sc *SchemaChanger) distIndexBackfill(
 			}
 			return nil
 		}); err != nil {
-			return err
+			return readAsOf, err
 		}
 		log.Infof(ctx, "persisting target safe write time %v...", writeAsOf)
 		if err := sc.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
@@ -951,18 +957,18 @@ func (sc *SchemaChanger) distIndexBackfill(
 			details.WriteTimestamp = writeAsOf
 			return sc.job.SetDetails(ctx, txn, details)
 		}); err != nil {
-			return err
+			return readAsOf, err
 		}
 		if err := sc.job.RunningStatus(ctx, nil /* txn */, func(_ context.Context, _ jobspb.Details) (jobs.RunningStatus, error) {
 			return RunningStatusBackfill, nil
 		}); err != nil {
-			return errors.Wrapf(err, "failed to update running status of job %d", errors.Safe(sc.job.ID()))
+			return readAsOf, errors.Wrapf(err, "failed to update running status of job %d", errors.Safe(sc.job.ID()))
 		}
 	} else {
 		log.Infof(ctx, "writing at persisted safe write time %v...", writeAsOf)
 	}
 
-	readAsOf := sc.clock.Now()
+	readAsOf = sc.clock.Now()
 
 	var p *PhysicalPlan
 	var evalCtx extendedEvalContext
@@ -1000,7 +1006,7 @@ func (sc *SchemaChanger) distIndexBackfill(
 		p, err = sc.distSQLPlanner.createBackfillerPhysicalPlan(planCtx, spec, todoSpans)
 		return err
 	}); err != nil {
-		return err
+		return readAsOf, err
 	}
 
 	// Processors stream back the completed spans via metadata.
@@ -1166,18 +1172,18 @@ func (sc *SchemaChanger) distIndexBackfill(
 	})
 
 	if err := g.Wait(); err != nil {
-		return err
+		return readAsOf, err
 	}
 
 	// Update progress and details to mark a completed job.
 	if err := updateJobDetails(); err != nil {
-		return err
+		return readAsOf, err
 	}
 	if err := updateJobProgress(); err != nil {
-		return err
+		return readAsOf, err
 	}
 
-	return nil
+	return readAsOf, nil
 }
 
 // distColumnBackfill runs (or continues) a backfill for the first mutation
@@ -1399,7 +1405,9 @@ func (sc *SchemaChanger) validateIndexes(ctx context.Context) error {
 			break
 		}
 		idx := m.AsIndex()
-		if idx == nil || idx.Dropped() {
+		// TODO(ssd) 2021-12-07: Why isn't the temporary index
+		// dropped by this point?
+		if idx == nil || idx.Dropped() || isTemporaryIndex(idx) {
 			continue
 		}
 		switch idx.GetType() {
@@ -1830,6 +1838,65 @@ func ValidateForwardIndexes(
 // backfillIndexes fills the missing columns in the indexes of the
 // leased tables.
 //
+// The index backfilling process has a goal of not having to issue
+// AddSStable requests with backdated timestamps.
+//
+// To do this, we backfill new indexes while they are in a BACKFILLING
+// state in which they do not see writes or deletes. While the
+// backfill is running a temporary index captures all inflight rights.
+//
+// When the backfill is completed, the backfilling index is stepped up
+// to DELETE_AND_WRITE_ONLY and then writes and deletes missed during
+// the backfill are merged from the temporary index.
+//
+//           ┌─────────────────┐         ┌─────────────────┐             ┌─────────────────┐
+//           │                 │         │                 │             │                 │
+//           │   PrimaryIndex  │         │     NewIndex    │             │    TempIndex    │
+// t0        │     (PUBLIC)    │         │  (BACKFILLING)  │             │  (DELETE_ONLY)  │
+//           │                 │         │                 │             │                 │
+//           └─────────────────┘         └─────────────────┘             └────────┬────────┘
+//                                                                                │
+//                                                                       ┌────────▼────────┐
+//                                                                       │                 │
+//                                                                       │    TempIndex    │
+// t1                                                                    │(DELETE_AND_WRITE)   │
+//                                                                       │                 │   │
+//                                                                       └────────┬────────┘   │
+//                                                                                │            │
+//           ┌─────────────────┐         ┌─────────────────┐             ┌────────▼────────┐   │ TempIndex receiving writes
+//           │                 │         │                 │             │                 │   │
+//           │  PrimaryIndex   ├────────►│     NewIndex    │             │    TempIndex    │   │
+// t2        │   (PUBLIC)      │ Backfill│  (BACKFILLING)  │             │(DELETE_AND_WRITE│   │
+//           │                 │         │                 │             │                 │   │
+//           └─────────────────┘         └────────┬────────┘             └─────────────────┘   │
+//                                                │                                            │
+//                                       ┌────────▼────────┐                                   │
+//                                       │                 │                                   │
+//                                       │     NewIndex    │                                   │
+// t3                                    │  (DELETE_ONLY)  │                                   │
+//                                       │                 │                                   │
+//                                       └────────┬────────┘                                   │
+//                                                │                                            │
+//                                       ┌────────▼────────┐                                   │
+//                                       │                 │                                   │
+//                                       │     NewIndex    │                                   │   │
+//                                       │(DELETE_AND_WRITE)                                   │   │
+// t4                                    │                 │                                   │   │ NewIndex receiving writes
+//                                       └─────────────────┘                                   │   │
+//                                                                                             │   │
+//                                       ┌─────────────────┐             ┌─────────────────┐   │   │
+//                                       │                 │             │                 │   │   │
+//                                       │     NewIndex    └◄────────────┤    TempIndex    │       │
+// t5                                    │(DELETE_AND_WRITE)  BatchMerge │(DELETE_AND_WRITE│       │
+//                                       │                 │             │                 │       │
+//                                       └─────────────────┘             └───────┬─────────┘       │
+//                                                                               │                 │
+//                                                                               │
+//                                                                               │
+//                                                                               │
+//                                                                               ▼
+//                                                                          [ DROP INDEX ]
+//
 // This operates over multiple goroutines concurrently and is thus not
 // able to reuse the original kv.Txn safely.
 func (sc *SchemaChanger) backfillIndexes(
@@ -1838,7 +1905,7 @@ func (sc *SchemaChanger) backfillIndexes(
 	addingSpans []roachpb.Span,
 	addedIndexes []descpb.IndexID,
 ) error {
-	log.Infof(ctx, "backfilling %d indexes", len(addingSpans))
+	log.Infof(ctx, "backfilling %d indexes: %v", len(addingSpans), addingSpans)
 
 	if fn := sc.testingKnobs.RunBeforeIndexBackfill; fn != nil {
 		fn()
@@ -1856,14 +1923,142 @@ func (sc *SchemaChanger) backfillIndexes(
 		}
 	}
 
-	if err := sc.distIndexBackfill(
+	readAsOf, err := sc.distIndexBackfill(
 		ctx, version, addingSpans, addedIndexes, backfill.IndexMutationFilter,
-	); err != nil {
+	)
+	if err != nil {
+		return err
+	}
+
+	// Step backfilled adding indexes from BACKFILLING to
+	// DELETE_AND_WRITE_ONLY.
+	if err := sc.RunStateMachineAfterIndexBackfill(ctx); err != nil {
+		return err
+	}
+
+	temporaryIndexes := make([]descpb.IndexID, 0, len(addedIndexes))
+	err = sc.txn(ctx, func(
+		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
+	) error {
+		tbl, err := descsCol.GetMutableTableVersionByID(ctx, sc.descID, txn)
+		if err != nil {
+			return err
+		}
+		for _, m := range tbl.AllMutations() {
+			if m.MutationID() != sc.mutationID {
+				// Mutations are applied in a FIFO order. Only apply the first set of
+				// mutations if they have the mutation ID we're looking for.
+				break
+			}
+			if idx := m.AsIndex(); idx != nil && idx.IndexDesc().UseDeletePreservingEncoding {
+				temporaryIndexes = append(temporaryIndexes, idx.IndexDesc().ID)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Merge backfilled adding index with temporary index.
+	if err := sc.mergeFromTemporaryIndex(ctx, version, addedIndexes, temporaryIndexes, readAsOf); err != nil {
+		return err
+	}
+
+	// Drop temporary index
+	if err := sc.stepThroughTemporaryIndexDrop(ctx); err != nil {
 		return err
 	}
 
 	log.Info(ctx, "finished backfilling indexes")
 	return sc.validateIndexes(ctx)
+}
+
+func (sc *SchemaChanger) mergeFromTemporaryIndex(
+	ctx context.Context,
+	version descpb.DescriptorVersion,
+	addingIndexes []descpb.IndexID,
+	temporaryIndexes []descpb.IndexID,
+	readAsOf hlc.Timestamp,
+) error {
+	// TODO(ssd) 2021-11-12: figure out what to do about all of these transactions
+	var tbl *tabledesc.Mutable
+	if err := sc.txn(ctx, func(
+		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
+	) error {
+		var err error
+		tbl, err = descsCol.GetMutableTableVersionByID(ctx, sc.descID, txn)
+		return err
+	}); err != nil {
+		return err
+	}
+	codec := keys.SystemSQLCodec
+	table := tabledesc.NewBuilder(&tbl.ClusterVersion).BuildImmutableTable()
+	for i, addIdx := range addingIndexes {
+		tempIdx := temporaryIndexes[i]
+		log.Infof(ctx, "merging from %d -> %d on %v", tempIdx, addIdx, table)
+		err := sc.Merge(ctx, codec, table, tempIdx, addIdx, readAsOf)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isTemporaryIndex(idx catalog.Index) bool {
+	return idx.IndexDesc().UseDeletePreservingEncoding
+}
+
+// stepThroughTemporaryIndexDrop looks takes any temporary index that
+// is currently in DELETE_AND_WRITE_ONLY and steps it to DELETE_ONLY.
+func (sc *SchemaChanger) stepThroughTemporaryIndexDrop(ctx context.Context) error {
+	var runStatus jobs.RunningStatus
+	return sc.txn(ctx, func(
+		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
+	) error {
+		tbl, err := descsCol.GetMutableTableVersionByID(ctx, sc.descID, txn)
+		if err != nil {
+			return err
+		}
+		runStatus = ""
+		// Apply mutations belonging to the same version.
+		for _, m := range tbl.AllMutations() {
+			if m.MutationID() != sc.mutationID {
+				// Mutations are applied in a FIFO order. Only apply the first set of
+				// mutations if they have the mutation ID we're looking for.
+				break
+			}
+			idx := m.AsIndex()
+			if idx == nil {
+				// Don't touch anything but indexes
+				continue
+			}
+			if isTemporaryIndex(idx) && m.Adding() && m.WriteAndDeleteOnly() {
+				log.Infof(ctx, "dropping temporary index: %d", idx.IndexDesc().ID)
+				tbl.Mutations[m.MutationOrdinal()].State = descpb.DescriptorMutation_DELETE_ONLY
+				tbl.Mutations[m.MutationOrdinal()].Direction = descpb.DescriptorMutation_DROP
+				runStatus = RunningStatusDeleteOnly
+			}
+		}
+		if runStatus == "" || tbl.Dropped() {
+			return nil
+		}
+		if err := descsCol.WriteDesc(
+			ctx, true /* kvTrace */, tbl, txn,
+		); err != nil {
+			return err
+		}
+		if sc.job != nil {
+			if err := sc.job.RunningStatus(ctx, txn, func(
+				ctx context.Context, details jobspb.Details,
+			) (jobs.RunningStatus, error) {
+				return runStatus, nil
+			}); err != nil {
+				return errors.Wrap(err, "failed to update job status")
+			}
+		}
+		return nil
+	})
 }
 
 // truncateAndBackfillColumns performs the backfill operation on the given leased
