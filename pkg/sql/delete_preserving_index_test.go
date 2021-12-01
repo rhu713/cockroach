@@ -151,30 +151,56 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 		schemaChangeSQL string
 		dataSQL         string
 	}{
-		{"secondary_index_encoding_test",
+		//		{"secondary_index_encoding_test",
+		//			`CREATE DATABASE d;
+		//			CREATE TABLE d.t (
+		//				k INT NOT NULL PRIMARY KEY,
+		//				a INT NOT NULL,
+		//				b INT
+		//			);`,
+		//			`CREATE INDEX ON d.t (a) STORING (b);`,
+		//			`INSERT INTO d.t (k, a, b) VALUES (1234, 101, 10001), (1235, 102, 10002), (1236, 103, 10003);
+		//DELETE FROM d.t WHERE k = 1;
+		//UPDATE d.t SET b = 10004 WHERE k = 2;`,
+		//		},
+		//		{"primary_encoding_test",
+		//			`CREATE DATABASE d;
+		//			CREATE TABLE d.t (
+		//				k INT NOT NULL PRIMARY KEY,
+		//				a INT NOT NULL,
+		//				b INT
+		//			);`,
+		//			`ALTER TABLE d.t ALTER PRIMARY KEY USING COLUMNS (k, a);`,
+		//			`INSERT INTO d.t (k, a, b) VALUES (1234, 101, 10001), (1235, 102, 10002), (1236, 103, 10003);
+		//DELETE FROM d.t WHERE k = 1;
+		//UPDATE d.t SET b = 10004 WHERE k = 2;`,
+		//		},
+		{"unique_index_test",
 			`CREATE DATABASE d;
-			CREATE TABLE d.t (
-				k INT NOT NULL PRIMARY KEY,
-				a INT NOT NULL,
-				b INT
-			);`,
-			`CREATE INDEX ON d.t (a) STORING (b);`,
+					CREATE TABLE d.t (
+						k INT NOT NULL PRIMARY KEY,
+						a INT NOT NULL,
+						b INT
+					);`,
+			`CREATE UNIQUE INDEX ON d.t (a);`,
 			`INSERT INTO d.t (k, a, b) VALUES (1234, 101, 10001), (1235, 102, 10002), (1236, 103, 10003);
-DELETE FROM d.t WHERE k = 1;
-UPDATE d.t SET b = 10004 WHERE k = 2;`,
+		DELETE FROM d.t WHERE k = 1234;
+--		INSERT INTO d.t (k, a, b) VALUES (1237, 101, 10004);
+UPDATE  d.t SET a = 101 WHERE k = 1236;
+`,
 		},
-		{"primary_encoding_test",
-			`CREATE DATABASE d;
-			CREATE TABLE d.t (
-				k INT NOT NULL PRIMARY KEY,
-				a INT NOT NULL,
-				b INT
-			);`,
-			`ALTER TABLE d.t ALTER PRIMARY KEY USING COLUMNS (k, a);`,
-			`INSERT INTO d.t (k, a, b) VALUES (1234, 101, 10001), (1235, 102, 10002), (1236, 103, 10003);
-DELETE FROM d.t WHERE k = 1;
-UPDATE d.t SET b = 10004 WHERE k = 2;`,
-		},
+		//{"primary_encoding_test_same_key",
+		//	`CREATE DATABASE d;
+		//			CREATE TABLE d.t (
+		//				k INT NOT NULL PRIMARY KEY,
+		//				a INT NOT NULL,
+		//				b INT
+		//			);`,
+		//	`ALTER TABLE d.t ALTER PRIMARY KEY USING COLUMNS (k, a);`,
+		//	`INSERT INTO d.t (k, a, b) VALUES (1234, 101, 10001), (1235, 102, 10002), (1236, 103, 10003);
+		//DELETE FROM d.t WHERE k = 1234;
+		//INSERT INTO d.t (k, a, b) VALUES (1234, 101, 10001);`,
+		//},
 	}
 
 	for _, test := range testCases {

@@ -163,6 +163,10 @@ func (ri *Inserter) InsertRow(
 	// because w is null, and the sole resident of that family.
 	// We don't want to insert empty k/v's like this, so we
 	// set includeEmpty to false.
+	if ri.Helper.TableDesc.GetName() == "t" {
+		fmt.Println("break")
+	}
+
 	primaryIndexKey, secondaryIndexEntries, err := ri.Helper.encodeIndexes(
 		ri.InsertColIDtoRowIndex, values, pm.IgnoreForPut, false /* includeEmpty */)
 	if err != nil {
@@ -188,7 +192,14 @@ func (ri *Inserter) InsertRow(
 		if ok {
 			for i := range entries {
 				e := &entries[i]
-				putFn(ctx, b, &e.Key, &e.Value, traceKV)
+
+				// We don't want to check any conflicts when trying to preserve deletes.
+				fmt.Printf("@@@ Inserter 1 %v k=%v v=%v\n", e, e.Key, e.Value)
+				if ri.Helper.Indexes[idx].UseDeletePreservingEncoding() {
+					insertPutFn(ctx, b, &e.Key, &e.Value, traceKV)
+				} else {
+					putFn(ctx, b, &e.Key, &e.Value, traceKV)
+				}
 			}
 		}
 	}

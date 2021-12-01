@@ -69,6 +69,13 @@ func ConvertBatchError(ctx context.Context, tableDesc catalog.TableDescriptor, b
 			break
 		}
 		key := result.Rows[0].Key
+		fmt.Println("@@@ error batch=", b)
+		for i := range b.Results {
+			if len(b.Results[i].Rows) > 0 {
+				fmt.Println("@@@ res", i, "=", b.Results[i].Rows[0].Key, "->", b.Results[i].Rows[0].Value)
+			}
+		}
+
 		return NewUniquenessConstraintViolationError(ctx, tableDesc, key, v.ActualValue)
 	case *roachpb.WriteIntentError:
 		key := v.Intents[0].Key
@@ -111,6 +118,7 @@ func ConvertFetchError(ctx context.Context, descForKey KeyToDescTranslator, err 
 func NewUniquenessConstraintViolationError(
 	ctx context.Context, tableDesc catalog.TableDescriptor, key roachpb.Key, value *roachpb.Value,
 ) error {
+	fmt.Printf("@@@ error key=%v v=%v\n", key, value)
 	index, names, values, err := DecodeRowInfo(ctx, tableDesc, key, value, false)
 	if err != nil {
 		return pgerror.Wrap(err, pgcode.UniqueViolation,
