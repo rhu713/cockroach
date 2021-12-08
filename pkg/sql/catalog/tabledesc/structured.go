@@ -2058,7 +2058,7 @@ func (desc *Mutable) addMutation(m descpb.DescriptorMutation) {
 		tempIndex.UseDeletePreservingEncoding = true
 		tempIndex.ID = 0
 		tempIndex.Name = ""
-		tempIndex.Unique = false
+		// tempIndex.Unique = false
 		m2 := descpb.DescriptorMutation{
 			Descriptor_: &descpb.DescriptorMutation_Index{Index: &tempIndex},
 			Direction:   descpb.DescriptorMutation_ADD,
