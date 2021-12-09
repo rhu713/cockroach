@@ -1948,6 +1948,11 @@ type SchemaChangerTestingKnobs struct {
 	// fixing the index backfill scan timestamp.
 	RunBeforeIndexBackfill func()
 
+	// RunBeforeTempIndexMerge is called just before starting the
+	// the merge from the temporary index into the new index,
+	// after the backfill scan timestamp has been fixed.
+	RunBeforeTempIndexMerge func()
+
 	// RunBeforeMaterializedViewRefreshCommit is called before committing a
 	// materialized view refresh.
 	RunBeforeMaterializedViewRefreshCommit func() error

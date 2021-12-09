@@ -1930,6 +1930,10 @@ func (sc *SchemaChanger) backfillIndexes(
 		return err
 	}
 
+	if fn := sc.testingKnobs.RunBeforeTempIndexMerge; fn != nil {
+		fn()
+	}
+
 	// Step backfilled adding indexes from BACKFILLING to
 	// DELETE_AND_WRITE_ONLY.
 	if err := sc.RunStateMachineAfterIndexBackfill(ctx); err != nil {
