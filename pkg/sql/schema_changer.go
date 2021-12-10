@@ -1064,10 +1064,23 @@ func (sc *SchemaChanger) stepStateMachineAfterIndexBackfill(ctx context.Context)
 	return nil
 }
 
+func (sc *SchemaChanger) createTemporaryIndexGCJob(
+	ctx context.Context, indexID descpb.IndexID, txn *kv.Txn, jobDesc string,
+) error {
+	minimumDropTime := int64(1)
+	return sc.createIndexGCJobWithDropTime(ctx, indexID, txn, jobDesc, minimumDropTime)
+}
+
 func (sc *SchemaChanger) createIndexGCJob(
 	ctx context.Context, indexID descpb.IndexID, txn *kv.Txn, jobDesc string,
 ) error {
 	dropTime := timeutil.Now().UnixNano()
+	return sc.createIndexGCJobWithDropTime(ctx, indexID, txn, jobDesc, dropTime)
+}
+
+func (sc *SchemaChanger) createIndexGCJobWithDropTime(
+	ctx context.Context, indexID descpb.IndexID, txn *kv.Txn, jobDesc string, dropTime int64,
+) error {
 	indexGCDetails := jobspb.SchemaChangeGCDetails{
 		Indexes: []jobspb.SchemaChangeGCDetails_DroppedIndex{
 			{
@@ -1176,9 +1189,14 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 				if isRollback {
 					description = "ROLLBACK of " + description
 				}
-
-				if err := sc.createIndexGCJob(ctx, idx.GetID(), txn, description); err != nil {
-					return err
+				if idx.UseDeletePreservingEncoding() {
+					if err := sc.createTemporaryIndexGCJob(ctx, idx.GetID(), txn, "TEMPORARY INDEXES USED DURING INDEX BACKFILL"); err != nil {
+						return err
+					}
+				} else {
+					if err := sc.createIndexGCJob(ctx, idx.GetID(), txn, description); err != nil {
+						return err
+					}
 				}
 
 			}
