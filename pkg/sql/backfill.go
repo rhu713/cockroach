@@ -1996,12 +1996,11 @@ func (sc *SchemaChanger) mergeFromTemporaryIndex(
 	}); err != nil {
 		return err
 	}
-	codec := keys.SystemSQLCodec
 	table := tabledesc.NewBuilder(&tbl.ClusterVersion).BuildImmutableTable()
 	for i, addIdx := range addingIndexes {
 		tempIdx := temporaryIndexes[i]
 		log.Infof(ctx, "merging from %d -> %d on %v", tempIdx, addIdx, table)
-		err := sc.Merge(ctx, codec, table, tempIdx, addIdx, readAsOf)
+		err := sc.Merge(ctx, sc.execCfg.Codec, table, tempIdx, addIdx, readAsOf)
 		if err != nil {
 			return err
 		}
