@@ -448,6 +448,7 @@ type indexCache struct {
 	all                  []catalog.Index
 	active               []catalog.Index
 	nonDrop              []catalog.Index
+	nonPrimary           []catalog.Index
 	publicNonPrimary     []catalog.Index
 	writableNonPrimary   []catalog.Index
 	deletableNonPrimary  []catalog.Index
@@ -484,6 +485,7 @@ func newIndexCache(desc *descpb.TableDescriptor, mutations *mutationCache) *inde
 		if !idx.Backfilling() {
 			lazyAllocAppendIndex(&c.deletableNonPrimary, idx, len(c.all[1:]))
 		}
+		lazyAllocAppendIndex(&c.nonPrimary, idx, len(c.all[1:]))
 	}
 
 	if numMutations == 0 {
