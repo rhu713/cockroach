@@ -2274,7 +2274,7 @@ func TestVisibilityDuringPrimaryKeyChange(t *testing.T) {
 	if _, err := sqlDB.Exec(`
 CREATE DATABASE t;
 CREATE TABLE t.test (x INT PRIMARY KEY, y INT NOT NULL, z INT, INDEX i (z));
-INSERT INTO t.test VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3); 
+INSERT INTO t.test VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
 `); err != nil {
 		t.Fatal(err)
 	}
@@ -2851,11 +2851,11 @@ func TestPrimaryKeyChangeKVOps(t *testing.T) {
 	if _, err := sqlDB.Exec(`
 CREATE DATABASE t;
 CREATE TABLE t.test (
-	x INT PRIMARY KEY, 
-	y INT NOT NULL, 
-	z INT, 
-	a INT, 
-	b INT, 
+	x INT PRIMARY KEY,
+	y INT NOT NULL,
+	z INT,
+	a INT,
+	b INT,
 	c INT,
 	FAMILY (x), FAMILY (y), FAMILY (z, a), FAMILY (b), FAMILY (c)
 )
@@ -2874,8 +2874,9 @@ CREATE TABLE t.test (
 		wg.Done()
 	}()
 
-	// Wait for the new primary index to move to the DELETE_AND_WRITE_ONLY
-	// state, which happens right before backfilling of the index begins.
+	// Wait for the temporary indexes for the new primary indexes
+	// to move to the DELETE_AND_WRITE_ONLY state, which happens
+	// right before backfilling of the index begins.
 	<-backfillNotification
 
 	scanToArray := func(rows *gosql.Rows) []string {
@@ -2896,18 +2897,36 @@ CREATE TABLE t.test (
 	INSERT INTO t.test VALUES (1, 2, 3, NULL, NULL, 6);
 	SET TRACING=off;
 	SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE
-		message LIKE 'InitPut /Table/%d/2%%' ORDER BY message;`, tableID))
+		message LIKE '%%Put /Table/%d%%' ORDER BY message;`, tableID))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	expected := []string{
-		fmt.Sprintf("InitPut /Table/%d/2/2/0 -> /TUPLE/1:1:Int/1", tableID),
+		// The first CPut's are to the primary index.
+		fmt.Sprintf("CPut /Table/%d/1/1/0 -> /TUPLE/", tableID),
 		// TODO (rohany): this k/v is spurious and should be removed
 		//  when #45343 is fixed.
-		fmt.Sprintf("InitPut /Table/%d/2/2/1/1 -> /INT/2", tableID),
-		fmt.Sprintf("InitPut /Table/%d/2/2/2/1 -> /TUPLE/3:3:Int/3", tableID),
-		fmt.Sprintf("InitPut /Table/%d/2/2/4/1 -> /INT/6", tableID),
+		fmt.Sprintf("CPut /Table/%d/1/1/1/1 -> /INT/2", tableID),
+		fmt.Sprintf("CPut /Table/%d/1/1/2/1 -> /TUPLE/3:3:Int/3", tableID),
+		fmt.Sprintf("CPut /Table/%d/1/1/4/1 -> /INT/6", tableID),
+		// Temporary index that exists during the
+		// backfill. This should have the same number of Puts
+		// as there are CPuts above.
+		fmt.Sprintf("Put /Table/%d/3/2/0 -> /BYTES/0x0a030a1302", tableID),
+		// TODO (rohany): this k/v is spurious and should be removed
+		//  when #45343 is fixed.
+		fmt.Sprintf("Put /Table/%d/3/2/1/1 -> /BYTES/0x0a020104", tableID),
+		fmt.Sprintf("Put /Table/%d/3/2/2/1 -> /BYTES/0x0a030a3306", tableID),
+		fmt.Sprintf("Put /Table/%d/3/2/4/1 -> /BYTES/0x0a02010c", tableID),
+
+		// ALTER PRIMARY KEY makes an additional unique index
+		// based on the old primary key. This is the write
+		fmt.Sprintf("Put /Table/%d/5/1/0 -> /BYTES/0x0a0103", tableID),
+
+		// Indexes 2 and 4 which are currently being added
+		// should have no writes because they are in the
+		// BACKFILLING state at this point.
 	}
 	require.Equal(t, expected, scanToArray(rows))
 
@@ -2916,18 +2935,31 @@ CREATE TABLE t.test (
 	SET TRACING=on, kv, results;
 	DELETE FROM t.test WHERE y = 2;
 	SET TRACING=off;
-	SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE
-		message LIKE 'Del /Table/%d/2%%' ORDER BY message;`, tableID))
+	SELECT message FROM [SHOW KV TRACE FOR SESSION]
+        WHERE
+		message LIKE 'Del /Table/%[1]d%%' OR
+                message LIKE 'Put (delete) /Table/%[1]d%%'
+        ORDER BY message;`, tableID))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	expected = []string{
-		fmt.Sprintf("Del /Table/%d/2/2/0", tableID),
-		fmt.Sprintf("Del /Table/%d/2/2/1/1", tableID),
-		fmt.Sprintf("Del /Table/%d/2/2/2/1", tableID),
-		fmt.Sprintf("Del /Table/%d/2/2/3/1", tableID),
-		fmt.Sprintf("Del /Table/%d/2/2/4/1", tableID),
+		// Primary index should see this delete.
+		fmt.Sprintf("Del /Table/%d/1/1/0", tableID),
+		fmt.Sprintf("Del /Table/%d/1/1/1/1", tableID),
+		fmt.Sprintf("Del /Table/%d/1/1/2/1", tableID),
+		fmt.Sprintf("Del /Table/%d/1/1/3/1", tableID),
+		fmt.Sprintf("Del /Table/%d/1/1/4/1", tableID),
+
+		// The temporary indexes are delete-preserving -- they
+		// should see the delete and issue Puts.
+		fmt.Sprintf("Put (delete) /Table/%d/3/2/0", tableID),
+		fmt.Sprintf("Put (delete) /Table/%d/3/2/1/1", tableID),
+		fmt.Sprintf("Put (delete) /Table/%d/3/2/2/1", tableID),
+		fmt.Sprintf("Put (delete) /Table/%d/3/2/3/1", tableID),
+		fmt.Sprintf("Put (delete) /Table/%d/3/2/4/1", tableID),
+		fmt.Sprintf("Put (delete) /Table/%d/5/1/0", tableID),
 	}
 	require.Equal(t, expected, scanToArray(rows))
 
@@ -2938,24 +2970,25 @@ CREATE TABLE t.test (
 	UPDATE t.test SET y = 3 WHERE y = 2;
 	SET TRACING=off;
 	SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE
-		message LIKE 'Put /Table/%d/2%%' OR
-		message LIKE 'Del /Table/%d/2%%' OR
-		message LIKE 'CPut /Table/%d/2%%';`, tableID, tableID, tableID))
+		message LIKE 'Put /Table/%[1]d/%%' OR
+		message LIKE 'Del /Table/%[1]d/%%' OR
+		message LIKE 'CPut /Table/%[1]d/%%';`, tableID))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	expected = []string{
-		fmt.Sprintf("Del /Table/%d/2/2/0", tableID),
-		fmt.Sprintf("CPut /Table/%d/2/3/0 -> /TUPLE/1:1:Int/1 (expecting does not exist)", tableID),
-		// TODO (rohany): this k/v is spurious and should be removed
-		//  when #45343 is fixed.
-		fmt.Sprintf("Del /Table/%d/2/2/1/1", tableID),
-		fmt.Sprintf("CPut /Table/%d/2/3/1/1 -> /INT/3 (expecting does not exist)", tableID),
-		fmt.Sprintf("Del /Table/%d/2/2/2/1", tableID),
-		fmt.Sprintf("CPut /Table/%d/2/3/2/1 -> /TUPLE/3:3:Int/3 (expecting does not exist)", tableID),
-		fmt.Sprintf("Del /Table/%d/2/2/4/1", tableID),
-		fmt.Sprintf("CPut /Table/%d/2/3/4/1 -> /INT/6 (expecting does not exist)", tableID),
+		// The primary index should see the update
+		fmt.Sprintf("Put /Table/%d/1/1/1/1 -> /INT/3", tableID),
+		// The temporary index for the newly added index sees
+		// a Put in all families.
+		fmt.Sprintf("Put /Table/%d/3/3/0 -> /BYTES/0x0a030a1302", tableID),
+		fmt.Sprintf("Put /Table/%d/3/3/1/1 -> /BYTES/0x0a020106", tableID),
+		fmt.Sprintf("Put /Table/%d/3/3/2/1 -> /BYTES/0x0a030a3306", tableID),
+		fmt.Sprintf("Put /Table/%d/3/3/4/1 -> /BYTES/0x0a02010c", tableID),
+		// The copy of the old primary index doesn't store
+		// anything. So it doesn't see a write for this
+		// update.
 	}
 	require.Equal(t, expected, scanToArray(rows))
 
@@ -2965,17 +2998,22 @@ CREATE TABLE t.test (
 	UPDATE t.test SET z = NULL, b = 5, c = NULL WHERE y = 3;
 	SET TRACING=off;
 	SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE
-		message LIKE 'Put /Table/%d/2%%' OR
-		message LIKE 'Del /Table/%d/2%%' OR
-		message LIKE 'CPut /Table/%d/2%%';`, tableID, tableID, tableID))
+		message LIKE 'Put /Table/%[1]d/%%' OR
+		message LIKE 'Del /Table/%[1]d/%%' OR
+		message LIKE 'CPut /Table/%[1]d/2%%';`, tableID))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	expected = []string{
-		fmt.Sprintf("Del /Table/%d/2/3/2/1", tableID),
-		fmt.Sprintf("CPut /Table/%d/2/3/3/1 -> /INT/5 (expecting does not exist)", tableID),
-		fmt.Sprintf("Del /Table/%d/2/3/4/1", tableID),
+
+		fmt.Sprintf("Del /Table/%d/1/1/2/1", tableID),
+		fmt.Sprintf("Put /Table/%d/1/1/3/1 -> /INT/5", tableID),
+		fmt.Sprintf("Del /Table/%d/1/1/4/1", tableID),
+
+		// TODO(ssd): double-check that this trace makes
+		// sense.
+		fmt.Sprintf("Put /Table/%d/3/3/3/1 -> /BYTES/0x0a02010a", tableID),
 	}
 	require.Equal(t, expected, scanToArray(rows))
 
@@ -3185,7 +3223,7 @@ func TestMultiplePrimaryKeyChanges(t *testing.T) {
 	if _, err := sqlDB.Exec(`
 CREATE DATABASE t;
 CREATE TABLE t.test (x INT NOT NULL, y INT NOT NULL, z INT NOT NULL, w int, INDEX i (w));
-INSERT INTO t.test VALUES (1, 1, 1, 1), (2, 2, 2, 2), (3, 3, 3, 3); 
+INSERT INTO t.test VALUES (1, 1, 1, 1), (2, 2, 2, 2), (3, 3, 3, 3);
 `); err != nil {
 		t.Fatal(err)
 	}
@@ -6613,7 +6651,7 @@ func TestFailureToMarkCanceledReversalLeadsToCanceledStatus(t *testing.T) {
 		jobsErrGroup.Go(func() error {
 			return testutils.SucceedsSoonError(func() error {
 				return sqlDB.QueryRow(`
-SELECT job_id FROM crdb_internal.jobs 
+SELECT job_id FROM crdb_internal.jobs
  WHERE description LIKE '%` + idxName + `%'`).Scan(&jobIDs[i])
 			})
 		})
@@ -6701,7 +6739,7 @@ func TestCancelMultipleQueued(t *testing.T) {
 		jobsErrGroup.Go(func() error {
 			return testutils.SucceedsSoonError(func() error {
 				return sqlDB.QueryRow(`
-SELECT job_id FROM crdb_internal.jobs 
+SELECT job_id FROM crdb_internal.jobs
  WHERE description LIKE '%` + idxName + `%'`).Scan(&jobIDs[i])
 			})
 		})

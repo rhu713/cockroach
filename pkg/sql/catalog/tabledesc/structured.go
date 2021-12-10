@@ -2082,7 +2082,6 @@ func (desc *Mutable) addMutationWithNextID(m descpb.DescriptorMutation) {
 	m.MutationID = desc.ClusterVersion.NextMutationID
 	desc.NextMutationID = desc.ClusterVersion.NextMutationID + 1
 	desc.Mutations = append(desc.Mutations, m)
-
 }
 
 // MakeFirstMutationPublic implements the TableDescriptor interface.
