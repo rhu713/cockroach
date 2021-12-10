@@ -1342,8 +1342,12 @@ func growKey(key []byte, additionalCapacity int) []byte {
 }
 
 func getIndexValueWrapperBytes(entry *IndexEntry) ([]byte, error) {
+	var value []byte
+	if entry.Value.IsPresent() {
+		value = entry.Value.TagAndDataBytes()
+	}
 	tempKV := rowencpb.IndexValueWrapper{
-		Value:   entry.Value.TagAndDataBytes(),
+		Value:   value,
 		Deleted: false,
 	}
 
