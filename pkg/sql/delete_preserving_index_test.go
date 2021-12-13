@@ -95,13 +95,13 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 		}()
 
 		<-atBackfillStage
-		// Find the descriptors for the indices.
+		// Find the descriptor for the temporary index mutation.
 		codec := keys.SystemSQLCodec
 		tableDesc := catalogkv.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
 		var index *descpb.IndexDescriptor
 		var ord int
 		for idx, i := range tableDesc.Mutations {
-			if i.GetIndex() != nil {
+			if i.GetIndex() != nil && i.GetIndex().UseDeletePreservingEncoding == true {
 				index = i.GetIndex()
 				ord = idx
 			}
@@ -111,18 +111,19 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 			return nil, nil, errors.Newf("Could not find index mutation")
 		}
 
-		if deletePreservingEncoding {
-			// Mutate index descriptor to use the delete-preserving encoding.
-			index.UseDeletePreservingEncoding = true
+		changeEncoding := func(delEnc bool) error {
+			index.UseDeletePreservingEncoding = delEnc
 			tableDesc.Mutations[ord].Descriptor_ = &descpb.DescriptorMutation_Index{Index: index}
-
-			if err := kvDB.Put(
+			return kvDB.Put(
 				context.Background(),
 				catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.GetID()),
 				tableDesc.DescriptorProto(),
-			); err != nil {
-				return nil, nil, err
-			}
+			)
+		}
+
+		origEnc := index.UseDeletePreservingEncoding
+		if err := changeEncoding(deletePreservingEncoding); err != nil {
+			return nil, nil, err
 		}
 
 		// Make some transactions.
@@ -132,12 +133,16 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 		}
 		end := kvDB.Clock().Now()
 
-		// Grab the revision histories for both indices.
+		// Grab the revision histories for the index.
 		prefix := rowenc.MakeIndexKeyPrefix(keys.SystemSQLCodec, tableDesc, index.ID)
 		prefixEnd := append(prefix, []byte("\xff")...)
 
 		revisions, err := kvclient.GetAllRevisions(context.Background(), kvDB, prefix, prefixEnd, now, end)
 		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := changeEncoding(origEnc); err != nil {
 			return nil, nil, err
 		}
 
@@ -230,6 +235,10 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error while getting default revisions %s", err)
 			}
+
+			require.NotEmpty(t, defaultRevisions, "default revisions cannot be empty")
+			require.NotEmpty(t, delEncRevisions, "delete encoding revisions cannot be empty")
+
 			err = compareRevisionHistories(defaultRevisions, len(defaultPrefix), delEncRevisions, len(delEncPrefix))
 			if err != nil {
 				t.Fatal(err)
