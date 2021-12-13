@@ -2149,6 +2149,11 @@ func runSchemaChangesInTxn(
 			continue
 		}
 
+		// Skip mutations related to temporary MutationsMutations
+		if idx := m.AsIndex(); idx != nil && idx.UseDeletePreservingEncoding() {
+			continue
+		}
+
 		immutDesc := tabledesc.NewBuilder(tableDesc.TableDesc()).BuildImmutableTable()
 
 		if m.Adding() {
