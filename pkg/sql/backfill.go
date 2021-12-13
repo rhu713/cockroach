@@ -1969,6 +1969,10 @@ func (sc *SchemaChanger) backfillIndexes(
 		return err
 	}
 
+	if fn := sc.testingKnobs.RunAfterTempIndexMerge; fn != nil {
+		fn()
+	}
+
 	// Drop temporary index
 	if err := sc.stepThroughTemporaryIndexDrop(ctx); err != nil {
 		return err

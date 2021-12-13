@@ -228,8 +228,8 @@ INSERT INTO t.test VALUES ('a', 'b'), ('c', 'd');
 		kvDB, keys.SystemSQLCodec, "t", "test")
 
 	// A long running schema change operation runs through
-	// a state machine that increments the version by 3.
-	expectedVersion := tableDesc.Version + 3
+	// a state machine that increments the version by 6.
+	expectedVersion := tableDesc.Version + 6
 
 	// Run some schema change
 	if _, err := sqlDB.Exec(`
@@ -3270,7 +3270,10 @@ func TestGrantRevokeWhileIndexBackfill(t *testing.T) {
 				}
 				return nil
 			},
-			RunAfterBackfillChunk: func() {
+			BulkAdderFlushesEveryBatch: true,
+		},
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			RunAfterTempIndexMerge: func() {
 				if backfillCompleteNotification != nil {
 					// Close channel to notify that the schema change
 					// backfill is complete and not finalized.
@@ -3279,8 +3282,8 @@ func TestGrantRevokeWhileIndexBackfill(t *testing.T) {
 					<-continueSchemaChangeNotification
 				}
 			},
-			BulkAdderFlushesEveryBatch: true,
 		},
+
 		// Disable backfill migrations, we still need the jobs table migration.
 		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
