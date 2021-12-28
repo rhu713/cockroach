@@ -387,6 +387,13 @@ type TableDescriptor interface {
 	// backfilling indexes.
 	DeletableNonPrimaryIndexes() []Index
 
+	// NonPrimaryIndexes returns a slice of all the indexes that
+	// are not yet public: backfilling, delete, and
+	// delete-and-write-only, in their canonical order. This is
+	// equivalent to taking the slice produced by AllIndexes and
+	// removing the primary index.
+	NonPrimaryIndexes() []Index
+
 	// DeleteOnlyNonPrimaryIndexes returns a slice of all non-primary indexes
 	// which allow only being deleted from, in their canonical order. This is
 	// equivalent to taking the slice produced by DeletableNonPrimaryIndexes and

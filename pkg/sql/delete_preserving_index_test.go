@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -94,13 +95,13 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 		}()
 
 		<-atBackfillStage
-		// Find the descriptors for the indices.
+		// Find the descriptor for the temporary index mutation.
 		codec := keys.SystemSQLCodec
 		tableDesc := catalogkv.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
 		var index *descpb.IndexDescriptor
 		var ord int
 		for idx, i := range tableDesc.Mutations {
-			if i.GetIndex() != nil {
+			if i.GetIndex() != nil && i.GetIndex().UseDeletePreservingEncoding == true {
 				index = i.GetIndex()
 				ord = idx
 			}
@@ -110,18 +111,19 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 			return nil, nil, errors.Newf("Could not find index mutation")
 		}
 
-		if deletePreservingEncoding {
-			// Mutate index descriptor to use the delete-preserving encoding.
-			index.UseDeletePreservingEncoding = true
+		changeEncoding := func(delEnc bool) error {
+			index.UseDeletePreservingEncoding = delEnc
 			tableDesc.Mutations[ord].Descriptor_ = &descpb.DescriptorMutation_Index{Index: index}
-
-			if err := kvDB.Put(
+			return kvDB.Put(
 				context.Background(),
 				catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.GetID()),
 				tableDesc.DescriptorProto(),
-			); err != nil {
-				return nil, nil, err
-			}
+			)
+		}
+
+		origEnc := index.UseDeletePreservingEncoding
+		if err := changeEncoding(deletePreservingEncoding); err != nil {
+			return nil, nil, err
 		}
 
 		// Make some transactions.
@@ -137,6 +139,10 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 
 		revisions, err := kvclient.GetAllRevisions(context.Background(), kvDB, prefix, prefixEnd, now, end)
 		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := changeEncoding(origEnc); err != nil {
 			return nil, nil, err
 		}
 
@@ -218,20 +224,20 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 			if err := resetTestData(); err != nil {
 				t.Fatalf("error while resetting test data %s", err)
 			}
-
 			delEncRevisions, delEncPrefix, err := getRevisionsForTest(test.setupSQL, test.schemaChangeSQL, test.dataSQL, true)
 			if err != nil {
 				t.Fatalf("error while getting delete encoding revisions %s", err)
 			}
-
 			if err := resetTestData(); err != nil {
 				t.Fatalf("error while resetting test data %s", err)
 			}
-
 			defaultRevisions, defaultPrefix, err := getRevisionsForTest(test.setupSQL, test.schemaChangeSQL, test.dataSQL, false)
 			if err != nil {
 				t.Fatalf("error while getting default revisions %s", err)
 			}
+
+			require.NotEmpty(t, defaultRevisions, "default revisions cannot be empty")
+			require.NotEmpty(t, delEncRevisions, "delete encoding revisions cannot be empty")
 
 			err = compareRevisionHistories(defaultRevisions, len(defaultPrefix), delEncRevisions, len(delEncPrefix))
 			if err != nil {
@@ -371,7 +377,7 @@ func TestMergeProcess(t *testing.T) {
 			name: "unique index",
 			setupSQL: `CREATE DATABASE d;
    CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b), 
+		UNIQUE INDEX idx (b),
 		UNIQUE INDEX idx_temp (b)
 );`,
 			srcIndex: "idx_temp",
@@ -400,7 +406,7 @@ func TestMergeProcess(t *testing.T) {
 			name: "unique index noop delete",
 			setupSQL: `CREATE DATABASE d;
    CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b), 
+		UNIQUE INDEX idx (b),
 		UNIQUE INDEX idx_temp (b)
 );`,
 			srcIndex: "idx_temp",
@@ -426,7 +432,7 @@ func TestMergeProcess(t *testing.T) {
 			name: "index with overriding values",
 			setupSQL: `CREATE DATABASE d;
    CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b), 
+		UNIQUE INDEX idx (b),
 		UNIQUE INDEX idx_temp (b)
 );`,
 			srcIndex:   "idx_temp",
@@ -521,8 +527,8 @@ func TestMergeProcess(t *testing.T) {
 		if err := changer.Merge(context.Background(),
 			codec,
 			tableDesc,
-			srcIndex,
-			dstIndex); err != nil {
+			srcIndex.GetID(),
+			dstIndex.GetID(), hlc.Timestamp{}); err != nil {
 			t.Fatal(err)
 		}
 

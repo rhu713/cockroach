@@ -517,6 +517,12 @@ func ForEachPartialIndex(desc TableDescriptor, f func(idx Index) error) error {
 	return forEachIndex(desc.PartialIndexes(), f)
 }
 
+// ForEachNonPrimaryIndex is like ForEachIndex over
+// NonPrimaryIndexes().
+func ForEachNonPrimaryIndex(desc TableDescriptor, f func(idx Index) error) error {
+	return forEachIndex(desc.NonPrimaryIndexes(), f)
+}
+
 // ForEachPublicNonPrimaryIndex is like ForEachIndex over
 // PublicNonPrimaryIndexes().
 func ForEachPublicNonPrimaryIndex(desc TableDescriptor, f func(idx Index) error) error {

@@ -1173,15 +1173,15 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR UNIQUE);
 		state descpb.DescriptorMutation_State
 	}{
 		{"d", 1, descpb.DescriptorMutation_DELETE_ONLY},
-		{"test_d_key", 1, descpb.DescriptorMutation_DELETE_ONLY},
+		{"test_d_key", 1, descpb.DescriptorMutation_BACKFILLING},
 		{"e", 1, descpb.DescriptorMutation_DELETE_ONLY},
-		{"test_e_key", 1, descpb.DescriptorMutation_DELETE_ONLY},
+		{"test_e_key", 1, descpb.DescriptorMutation_BACKFILLING},
 		{"f", 1, descpb.DescriptorMutation_DELETE_ONLY},
 		// Second schema change.
 		{"g", 2, descpb.DescriptorMutation_DELETE_ONLY},
-		{"idx_f", 2, descpb.DescriptorMutation_DELETE_ONLY},
+		{"idx_f", 2, descpb.DescriptorMutation_BACKFILLING},
 		// Third.
-		{"idx_g", 3, descpb.DescriptorMutation_DELETE_ONLY},
+		{"idx_g", 3, descpb.DescriptorMutation_BACKFILLING},
 		// Drop mutations start off in the DELETE_AND_WRITE_ONLY state.
 		// UNIQUE column deletion gets split into two mutations with the same ID.
 		{"test_v_key", 4, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY},

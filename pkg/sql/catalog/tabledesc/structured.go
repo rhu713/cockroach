@@ -712,7 +712,7 @@ func (desc *Mutable) allocateIndexIDs(columnNames map[string]descpb.ColumnID) er
 	}
 
 	// Assign names to unnamed indexes.
-	err := catalog.ForEachDeletableNonPrimaryIndex(desc, func(idx catalog.Index) error {
+	err := catalog.ForEachNonPrimaryIndex(desc, func(idx catalog.Index) error {
 		if len(idx.GetName()) == 0 {
 			name, err := BuildIndexName(desc, idx.IndexDesc())
 			if err != nil {
@@ -2016,7 +2016,35 @@ func (desc *Mutable) AddColumnMutation(
 func (desc *Mutable) AddIndexMutation(
 	idx *descpb.IndexDescriptor, direction descpb.DescriptorMutation_Direction,
 ) error {
+	if err := desc.checkValidIndex(idx); err != nil {
+		return err
+	}
+	m := descpb.DescriptorMutation{
+		Descriptor_: &descpb.DescriptorMutation_Index{Index: idx},
+		Direction:   direction,
+	}
+	desc.addMutation(m)
+	return nil
+}
 
+// DeprecatedAddIndexMutation adds an index mutation to desc.Mutations that
+// assumes that the first state an added index should be placed into
+// is DELETE_ONLY rather than BACKFILLING.
+func (desc *Mutable) DeprecatedAddIndexMutation(
+	idx *descpb.IndexDescriptor, direction descpb.DescriptorMutation_Direction,
+) error {
+	if err := desc.checkValidIndex(idx); err != nil {
+		return err
+	}
+	m := descpb.DescriptorMutation{
+		Descriptor_: &descpb.DescriptorMutation_Index{Index: idx},
+		Direction:   direction,
+	}
+	desc.deprecatedAddMutation(m)
+	return nil
+}
+
+func (desc *Mutable) checkValidIndex(idx *descpb.IndexDescriptor) error {
 	switch idx.Type {
 	case descpb.IndexDescriptor_FORWARD:
 		if err := checkColumnsValidForIndex(desc, idx.KeyColumnNames); err != nil {
@@ -2027,12 +2055,6 @@ func (desc *Mutable) AddIndexMutation(
 			return err
 		}
 	}
-
-	m := descpb.DescriptorMutation{
-		Descriptor_: &descpb.DescriptorMutation_Index{Index: idx},
-		Direction:   direction,
-	}
-	desc.addMutation(m)
 	return nil
 }
 
@@ -2067,11 +2089,31 @@ func (desc *Mutable) AddComputedColumnSwapMutation(swap *descpb.ComputedColumnSw
 func (desc *Mutable) addMutation(m descpb.DescriptorMutation) {
 	switch m.Direction {
 	case descpb.DescriptorMutation_ADD:
-		m.State = descpb.DescriptorMutation_DELETE_ONLY
-
+		switch m.Descriptor_.(type) {
+		case *descpb.DescriptorMutation_Index:
+			m.State = descpb.DescriptorMutation_BACKFILLING
+		default:
+			m.State = descpb.DescriptorMutation_DELETE_ONLY
+		}
 	case descpb.DescriptorMutation_DROP:
 		m.State = descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY
 	}
+	desc.addMutationWithNextID(m)
+}
+
+// deprecatedAddMutation assumes that new indexes are added in the
+// DELETE_ONLY state.
+func (desc *Mutable) deprecatedAddMutation(m descpb.DescriptorMutation) {
+	switch m.Direction {
+	case descpb.DescriptorMutation_ADD:
+		m.State = descpb.DescriptorMutation_DELETE_ONLY
+	case descpb.DescriptorMutation_DROP:
+		m.State = descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY
+	}
+	desc.addMutationWithNextID(m)
+}
+
+func (desc *Mutable) addMutationWithNextID(m descpb.DescriptorMutation) {
 	// For tables created in the same transaction the next mutation ID will
 	// not have been allocated and the added mutation will use an invalid ID.
 	// This is fine because the mutation will be processed immediately.
