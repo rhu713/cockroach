@@ -1703,7 +1703,7 @@ func (desc *Mutable) MakeMutationComplete(m descpb.DescriptorMutation) error {
 			primaryIndexCopy := desc.GetPrimaryIndex().IndexDescDeepCopy()
 			// Move the old primary index from the table descriptor into the mutations queue
 			// to schedule it for deletion.
-			if err := desc.AddIndexMutation(&primaryIndexCopy, descpb.DescriptorMutation_DROP); err != nil {
+			if err := desc.DeprecatedAddIndexMutation(&primaryIndexCopy, descpb.DescriptorMutation_DROP); err != nil {
 				return err
 			}
 
@@ -1757,7 +1757,7 @@ func (desc *Mutable) MakeMutationComplete(m descpb.DescriptorMutation) error {
 				desc.RemovePublicNonPrimaryIndex(oldIndexIdx)
 				// Add a drop mutation for the old index. The code that calls this function will schedule
 				// a schema change job to pick up all of these index drop mutations.
-				if err := desc.AddIndexMutation(oldIndexCopy, descpb.DescriptorMutation_DROP); err != nil {
+				if err := desc.DeprecatedAddIndexMutation(oldIndexCopy, descpb.DescriptorMutation_DROP); err != nil {
 					return err
 				}
 			}
@@ -2024,7 +2024,22 @@ func (desc *Mutable) AddIndexMutation(
 		Direction:   direction,
 	}
 	desc.addMutation(m)
+
+	desc.addTemporaryIndexMutation(idx)
 	return nil
+}
+
+func (desc *Mutable) addTemporaryIndexMutation(idx *descpb.IndexDescriptor) {
+	tempIndex := *protoutil.Clone(idx).(*descpb.IndexDescriptor)
+	tempIndex.UseDeletePreservingEncoding = true
+	tempIndex.ID = 0
+	tempIndex.Name = ""
+
+	m := descpb.DescriptorMutation{
+		Descriptor_: &descpb.DescriptorMutation_Index{Index: &tempIndex},
+		Direction:   descpb.DescriptorMutation_ADD,
+	}
+	desc.addMutation(m)
 }
 
 // DeprecatedAddIndexMutation adds an index mutation to desc.Mutations that
@@ -2091,7 +2106,11 @@ func (desc *Mutable) addMutation(m descpb.DescriptorMutation) {
 	case descpb.DescriptorMutation_ADD:
 		switch m.Descriptor_.(type) {
 		case *descpb.DescriptorMutation_Index:
-			m.State = descpb.DescriptorMutation_BACKFILLING
+			if m.GetIndex().UseDeletePreservingEncoding {
+				m.State = descpb.DescriptorMutation_DELETE_ONLY
+			} else {
+				m.State = descpb.DescriptorMutation_BACKFILLING
+			}
 		default:
 			m.State = descpb.DescriptorMutation_DELETE_ONLY
 		}

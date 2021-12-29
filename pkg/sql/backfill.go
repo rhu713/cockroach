@@ -196,6 +196,7 @@ func (sc *SchemaChanger) runBackfill(ctx context.Context) error {
 	var droppedIndexes []catalog.Index
 	var addedIndexSpans []roachpb.Span
 	var addedIndexes []descpb.IndexID
+	var temporaryIndexes []descpb.IndexID
 
 	var constraintsToDrop []catalog.ConstraintToUpdate
 	var constraintsToAddBeforeValidation []catalog.ConstraintToUpdate
@@ -254,6 +255,7 @@ func (sc *SchemaChanger) runBackfill(ctx context.Context) error {
 				// temporary index, the backfiller
 				// uses these and will move them to
 				// dropping when it is done.
+				temporaryIndexes = append(temporaryIndexes, idx.GetID())
 			} else if c := m.AsConstraint(); c != nil {
 				isValidating := false
 				if c.IsCheck() {
@@ -328,7 +330,7 @@ func (sc *SchemaChanger) runBackfill(ctx context.Context) error {
 	// Add new indexes.
 	if len(addedIndexSpans) > 0 {
 		// Check if bulk-adding is enabled and supported by indexes (ie non-unique).
-		if err := sc.backfillIndexes(ctx, version, addedIndexSpans, addedIndexes); err != nil {
+		if err := sc.backfillIndexes(ctx, version, addedIndexSpans, addedIndexes, temporaryIndexes); err != nil {
 			return err
 		}
 	}
@@ -1963,6 +1965,7 @@ func (sc *SchemaChanger) backfillIndexes(
 	version descpb.DescriptorVersion,
 	addingSpans []roachpb.Span,
 	addedIndexes []descpb.IndexID,
+	temporaryIndexes []descpb.IndexID,
 ) error {
 	log.Infof(ctx, "backfilling %d indexes: %v", len(addingSpans), addingSpans)
 	// Split off a new range for each new index span. But only do so for the
@@ -1977,30 +1980,30 @@ func (sc *SchemaChanger) backfillIndexes(
 		}
 	}
 
-	temporaryIndexes, err := sc.createTemporaryIndexes(ctx, addedIndexes)
-	if err != nil {
-		return err
-	}
+	//temporaryIndexes, err := sc.createTemporaryIndexes(ctx, addedIndexes)
+	//if err != nil {
+	//	return err
+	//}
 
 	if fn := sc.testingKnobs.RunBeforeIndexBackfill; fn != nil {
 		fn()
 	}
 
-	// Re-read the table version as it was bumped wen creating the
-	// temporary index.
-	err = sc.txn(ctx, func(
-		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
-	) error {
-		tbl, err := descsCol.GetMutableTableVersionByID(ctx, sc.descID, txn)
-		if err != nil {
-			return err
-		}
-		version = tbl.Version
-		return nil
-	})
-	if err != nil {
-		return err
-	}
+	//// Re-read the table version as it was bumped wen creating the
+	//// temporary index.
+	//err = sc.txn(ctx, func(
+	//	ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
+	//) error {
+	//	tbl, err := descsCol.GetMutableTableVersionByID(ctx, sc.descID, txn)
+	//	if err != nil {
+	//		return err
+	//	}
+	//	version = tbl.Version
+	//	return nil
+	//})
+	//if err != nil {
+	//	return err
+	//}
 
 	readAsOf, err := sc.distIndexBackfill(
 		ctx, version, addingSpans, addedIndexes, backfill.IndexMutationFilter,
