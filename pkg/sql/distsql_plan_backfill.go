@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/pkg/errors"
 )
 
 func initColumnBackfillerSpec(
@@ -49,6 +50,22 @@ func initIndexBackfillerSpec(
 	}, nil
 }
 
+func initIndexBackfillMergerSpec(
+	desc descpb.TableDescriptor,
+	chunkSize int64,
+	readTimestamp hlc.Timestamp,
+	addedIndexes []descpb.IndexID,
+	temporaryIndexes []descpb.IndexID,
+) (execinfrapb.IndexBackfillMergerSpec, error) {
+	return execinfrapb.IndexBackfillMergerSpec{
+		Table:            desc,
+		ReadTimestamp:    readTimestamp,
+		ChunkSize:        chunkSize,
+		AddedIndexes:     addedIndexes,
+		TemporaryIndexes: temporaryIndexes,
+	}, nil
+}
+
 // createBackfiller generates a plan consisting of index/column backfiller
 // processors, one for each node that has spans that we are reading. The plan is
 // finalized.
@@ -71,6 +88,58 @@ func (dsp *DistSQLPlanner) createBackfillerPhysicalPlan(
 			Node: sp.Node,
 			Spec: execinfrapb.ProcessorSpec{
 				Core:        execinfrapb.ProcessorCoreUnion{Backfiller: ib},
+				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
+				ResultTypes: []*types.T{},
+			},
+		}
+
+		pIdx := p.AddProcessor(proc)
+		p.ResultRouters[i] = pIdx
+	}
+	dsp.FinalizePlan(planCtx, p)
+	return p, nil
+}
+
+// createBackfiller generates a plan consisting of index/column backfiller
+// processors, one for each node that has spans that we are reading. The plan is
+// finalized.
+func (dsp *DistSQLPlanner) createIndexBackfillerMergePhysicalPlan(
+	planCtx *PlanningCtx, spec execinfrapb.IndexBackfillMergerSpec, spans [][]roachpb.Span,
+) (*PhysicalPlan, error) {
+
+	var indexSpans []roachpb.Span
+	var spanIdxs []interface{}
+
+	for i := range spans {
+		for j := range spans[i] {
+			indexSpans = append(indexSpans, spans[i][j])
+			spanIdxs = append(spanIdxs, i)
+		}
+	}
+	spanPartitions, idxByPartition, err := dsp.PartitionSpansWithUserData(planCtx, indexSpans, spanIdxs)
+	if err != nil {
+		return nil, err
+	}
+
+	p := planCtx.NewPhysicalPlan()
+	p.ResultRouters = make([]physicalplan.ProcessorIdx, len(spanPartitions))
+	for i, sp := range spanPartitions {
+		ibm := &execinfrapb.IndexBackfillMergerSpec{}
+		*ibm = spec
+
+		ibm.Spans = sp.Spans
+		for j := range idxByPartition[i] {
+			idx, ok := idxByPartition[i][j].(int)
+			if !ok {
+				return nil, errors.Errorf("Unexpected non-int type for idx %v", idxByPartition[i][j])
+			}
+			ibm.SpanIdx = append(ibm.SpanIdx, int32(idx))
+		}
+
+		proc := physicalplan.Processor{
+			Node: sp.Node,
+			Spec: execinfrapb.ProcessorSpec{
+				Core:        execinfrapb.ProcessorCoreUnion{IndexBackfillMerger: ibm},
 				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
 				ResultTypes: []*types.T{},
 			},

@@ -318,3 +318,18 @@ message ParquetWriterSpec {
 message BulkRowWriterSpec {
   optional sqlbase.TableDescriptor table = 1 [(gogoproto.nullable) = false];
 }
+
+message IndexBackfillMergerSpec {
+  optional sqlbase.TableDescriptor table = 1 [(gogoproto.nullable) = false];
+
+  repeated uint32 temporary_indexes = 2 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.IndexID"];
+  repeated uint32 added_indexes = 3 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.IndexID"];
+
+  repeated roachpb.Span spans = 4 [(gogoproto.nullable) = false];
+  repeated int32 span_idx = 5 [(gogoproto.nullable) = false];
+
+  optional int64 chunk_size = 6 [(gogoproto.nullable) = false];
+
+  optional util.hlc.Timestamp read_timestamp = 7 [(gogoproto.nullable) = false];
+
+}

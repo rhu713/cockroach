@@ -671,7 +671,9 @@ message SchemaChangeDetails {
   // a time that has been identified via a scan as safe for writing.
   util.hlc.Timestamp write_timestamp = 10 [(gogoproto.nullable) = false];
 
-  // NEXT ID: 11.
+  util.hlc.Timestamp read_timestamp = 11 [(gogoproto.nullable) = false];
+
+  // NEXT ID: 12.
 }
 
 message SchemaChangeProgress {

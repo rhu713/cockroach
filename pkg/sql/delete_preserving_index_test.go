@@ -12,12 +12,14 @@ package sql_test
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
@@ -351,7 +353,7 @@ func compareVersionedValueWrappers(
 
 // This test tests that the schema changer is able to merge entries from a
 // delete-preserving index into a regular index.
-func TestMergeProcess(t *testing.T) {
+func TestMergeProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
@@ -462,13 +464,19 @@ func TestMergeProcess(t *testing.T) {
 
 		codec := keys.SystemSQLCodec
 		tableDesc := catalogkv.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
-		lm := server.LeaseManager().(*lease.Manager)
 		settings := server.ClusterSettings()
 		execCfg := server.ExecutorConfig().(sql.ExecutorConfig)
-		jr := server.JobRegistry().(*jobs.Registry)
+		evalCtx := tree.EvalContext{Settings: settings}
+		flowCtx := execinfra.FlowCtx{Cfg: &execinfra.ServerConfig{DB: kvDB,
+			Settings: settings,
+			Codec:    codec,
+		},
+			EvalCtx: &evalCtx}
 
-		changer := sql.NewSchemaChangerForTesting(
-			tableDesc.GetID(), 1, execCfg.NodeID.SQLInstanceID(), kvDB, lm, jr, &execCfg, settings)
+		im, err := backfill.NewIndexBackfillMerger(&flowCtx, execinfrapb.IndexBackfillMergerSpec{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Here want to have different entries for the two indices, so we manipulate
 		// the index to DELETE_ONLY when we don't want to write to it, and
@@ -524,11 +532,9 @@ func TestMergeProcess(t *testing.T) {
 			return nil
 		}))
 
-		if err := changer.Merge(context.Background(),
-			codec,
-			tableDesc,
-			srcIndex.GetID(),
-			dstIndex.GetID(), hlc.Timestamp{}); err != nil {
+		_, err = im.Merge(context.Background(), codec, tableDesc, srcIndex.GetID(), dstIndex.GetID(), []roachpb.Span{tableDesc.IndexSpan(codec, srcIndex.GetID())},
+			hlc.Timestamp{})
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -577,7 +583,7 @@ func fetchIndex(
 ) []tree.Datums {
 	t.Helper()
 	var fetcher row.Fetcher
-	var alloc rowenc.DatumAlloc
+	var alloc tree.DatumAlloc
 
 	mm := mon.MakeStandaloneBudget(1 << 30)
 	idx, err := table.FindIndexWithName(indexName)

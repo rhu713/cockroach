@@ -13,6 +13,7 @@ package rowexec
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -375,6 +376,12 @@ func NewProcessor(
 			return nil, err
 		}
 		return NewStreamIngestionFrontierProcessor(flowCtx, processorID, *core.StreamIngestionFrontier, inputs[0], post, outputs[0])
+	}
+	if core.IndexBackfillMerger != nil {
+		if err := checkNumInOut(inputs, outputs, 0, 1); err != nil {
+			return nil, err
+		}
+		return backfill.NewIndexBackfillMerger(flowCtx, *core.IndexBackfillMerger, outputs[0])
 	}
 	return nil, errors.Errorf("unsupported processor core %q", core)
 }

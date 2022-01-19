@@ -12,103 +12,222 @@ package sql
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/errors"
+	"golang.org/x/sync/errgroup"
+	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
-// Merge merges the entries in the destination index to the source index. The
-// destination index is always assumed to be using the delete-preserving
-// encoding. Key conflicts are resolved by always preferring the value in the
-// destination index, or by preferring the delete if applicable.
-func (sc *SchemaChanger) Merge(
-	ctx context.Context,
-	codec keys.SQLCodec,
-	table catalog.TableDescriptor,
-	sourceID descpb.IndexID,
-	destinationID descpb.IndexID,
-	readAsOf hlc.Timestamp,
-) error {
-	// TODO(rhu): Do we need to get the timestamp and use a fix timestamp?
-	mergeTimestamp := sc.clock.Now()
-
-	sourceSpan := table.IndexSpan(codec, sourceID)
-	destSpan := table.IndexSpan(codec, destinationID)
-
-	const pageSize = 1000
-
-	return sc.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetFixedTimestamp(ctx, mergeTimestamp); err != nil {
-			return err
-		}
-
-		return txn.Iterate(ctx, sourceSpan.Key, sourceSpan.EndKey, pageSize, func(kvs []kv.KeyValue) error {
-			destKeys := make([]roachpb.Key, len(kvs))
-
-			prefixLen := len(sourceSpan.Key)
-
-			// For now just grab all of the destination KVs and merge the corresponding entries.
-			for i := range kvs {
-				sourceKV := &kvs[i]
-
-				if len(sourceKV.Key) < prefixLen {
-					return errors.Errorf("Key for index entry %v does not start with prefix %v", sourceKV, sourceSpan.Key)
-				}
-
-				destKey := make([]byte, len(destSpan.Key))
-				copy(destKey, destSpan.Key)
-				destKey = append(destKey, sourceKV.Key[prefixLen:]...)
-				destKeys[i] = destKey
-			}
-
-			wb := txn.NewBatch()
-			for i := range kvs {
-				if kvs[i].Value.Timestamp.Less(readAsOf) {
-					continue
-				}
-				mergedEntry, deleted, err := mergeEntry(&kvs[i], destKeys[i])
-				if err != nil {
-					return err
-				}
-
-				if deleted {
-					wb.Del(mergedEntry.Key)
-				} else {
-					wb.Put(mergedEntry.Key, mergedEntry.Value)
-				}
-			}
-
-			return txn.Run(ctx, wb)
-		})
-	})
+type IndexBackfillerMergePlanner struct {
+	execCfg   *ExecutorConfig
+	ieFactory sqlutil.SessionBoundInternalExecutorFactory
 }
 
-func mergeEntry(sourceKV *kv.KeyValue, destKey roachpb.Key) (*kv.KeyValue, bool, error) {
-	var destTagAndData []byte
-	var deleted bool
+func NewIndexBackfillerMergePlanner(
+	execCfg *ExecutorConfig, ieFactory sqlutil.SessionBoundInternalExecutorFactory,
+) *IndexBackfillerMergePlanner {
+	return &IndexBackfillerMergePlanner{execCfg: execCfg, ieFactory: ieFactory}
+}
 
-	tempWrapper, err := rowenc.DecodeWrapper(sourceKV.Value)
-	if err != nil {
-		return nil, false, err
+func (im *IndexBackfillerMergePlanner) plan(
+	ctx context.Context,
+	tableDesc catalog.TableDescriptor,
+	readTimestamp hlc.Timestamp,
+	todoSpanList [][]roachpb.Span,
+	addedIndexes, temporaryIndexes []descpb.IndexID,
+	metaFn func(_ context.Context, meta *execinfrapb.ProducerMetadata) error,
+) (func(context.Context) error, error) {
+	var p *PhysicalPlan
+	var evalCtx extendedEvalContext
+	var planCtx *PlanningCtx
+
+	// The txn is used to fetch a tableDesc, partition the spans and set the
+	// evalCtx ts all of which is during planning of the DistSQL flow.
+	if err := DescsTxn(ctx, im.execCfg, func(
+		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
+	) error {
+		evalCtx = createSchemaChangeEvalCtx(ctx, im.execCfg, txn.ReadTimestamp(), descriptors)
+		planCtx = im.execCfg.DistSQLPlanner.NewPlanningCtx(ctx, &evalCtx, nil /* planner */, txn,
+			true /* distribute */)
+		chunkSize := indexBackfillBatchSize.Get(&im.execCfg.Settings.SV)
+
+		spec, err := initIndexBackfillMergerSpec(*tableDesc.TableDesc(), chunkSize, readTimestamp, addedIndexes, temporaryIndexes)
+		if err != nil {
+			return err
+		}
+		p, err = im.execCfg.DistSQLPlanner.createIndexBackfillerMergePhysicalPlan(planCtx, spec, todoSpanList)
+		return err
+	}); err != nil {
+		return nil, err
 	}
 
-	if tempWrapper.Deleted {
-		deleted = true
-	} else {
-		destTagAndData = tempWrapper.Value
+	return func(ctx context.Context) error {
+		cbw := MetadataCallbackWriter{rowResultWriter: &errOnlyResultWriter{}, fn: metaFn}
+		recv := MakeDistSQLReceiver(
+			ctx,
+			&cbw,
+			tree.Rows, /* stmtType - doesn't matter here since no result are produced */
+			im.execCfg.RangeDescriptorCache,
+			nil, /* txn - the flow does not run wholly in a txn */
+			im.execCfg.Clock,
+			evalCtx.Tracing,
+			im.execCfg.ContentionRegistry,
+			nil, /* testingPushCallback */
+		)
+		defer recv.Release()
+		evalCtxCopy := evalCtx
+		im.execCfg.DistSQLPlanner.Run(
+			planCtx,
+			nil, /* txn - the processors manage their own transactions */
+			p, recv, &evalCtxCopy,
+			nil, /* finishedSetupFn */
+		)()
+		return cbw.Err()
+	}, nil
+}
+
+type MergeProgress struct {
+	todoSpans                      [][]roachpb.Span
+	mutationIdx                    []int
+	readTimestamp                  hlc.Timestamp
+	addedIndexes, temporaryIndexes []descpb.IndexID
+}
+
+type IndexMergeTracker struct {
+	mu struct {
+		syncutil.Mutex
+		progress *MergeProgress
+	}
+}
+
+func NewIndexMergeTracker(progress *MergeProgress) *IndexMergeTracker {
+	imt := IndexMergeTracker{}
+	imt.mu.progress = progress
+	return &imt
+}
+
+func (imt *IndexMergeTracker) FlushCheckpoint(ctx context.Context, job *jobs.Job) error {
+	updatedTodoSpans := imt.GetProgress()
+
+	if updatedTodoSpans.todoSpans == nil {
+		return nil
 	}
 
-	value := &roachpb.Value{}
-	value.SetTagAndData(destTagAndData)
+	details, ok := job.Details().(jobspb.SchemaChangeDetails)
+	if !ok {
+		return errors.Errorf("expected SchemaChangeDetails job type, got %T", job.Details())
+	}
 
-	return &kv.KeyValue{
-		Key:   destKey,
-		Value: value,
-	}, deleted, nil
+	for idx := range updatedTodoSpans.todoSpans {
+		details.ResumeSpanList[updatedTodoSpans.mutationIdx[idx]].ResumeSpans = updatedTodoSpans.todoSpans[idx]
+	}
+
+	return job.SetDetails(ctx, nil, details)
+}
+
+func (imt *IndexMergeTracker) FlushFractionCompleted(ctx context.Context) error {
+	// TODO(rui): The backfiller currently doesn't have a good way to report the
+	// total progress of mutations that occur in multiple stages that
+	// independently report progress. So fraction tracking of the merge will be
+	// unimplemented for now and the progress fraction will report only the
+	// progress of the backfilling stage.
+	return nil
+}
+
+func (imt *IndexMergeTracker) UpdateMergeProgress(ctx context.Context, progress *MergeProgress) {
+	imt.mu.Lock()
+	imt.mu.progress = progress
+	imt.mu.Unlock()
+}
+
+func (imt *IndexMergeTracker) GetProgress() *MergeProgress {
+	imt.mu.Lock()
+	defer imt.mu.Unlock()
+	return imt.mu.progress
+}
+
+type PeriodicMergeProgressFlusher struct {
+	clock                                timeutil.TimeSource
+	checkpointInterval, fractionInterval func() time.Duration
+}
+
+func (p *PeriodicMergeProgressFlusher) StartPeriodicUpdates(
+	ctx context.Context, tracker *IndexMergeTracker, job *jobs.Job,
+) (stop func() error) {
+	stopCh := make(chan struct{})
+	runPeriodicWrite := func(
+		ctx context.Context,
+		write func(context.Context) error,
+		interval func() time.Duration,
+	) error {
+		timer := p.clock.NewTimer()
+		defer timer.Stop()
+		for {
+			timer.Reset(interval())
+			select {
+			case <-stopCh:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.Ch():
+				timer.MarkRead()
+				if err := write(ctx); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	var g errgroup.Group
+	g.Go(func() error {
+		return runPeriodicWrite(
+			ctx, tracker.FlushFractionCompleted, p.fractionInterval)
+	})
+	g.Go(func() error {
+		return runPeriodicWrite(
+			ctx,
+			func(ctx context.Context) error {
+				return tracker.FlushCheckpoint(ctx, job)
+			},
+			p.checkpointInterval)
+	})
+	toClose := stopCh // make the returned function idempotent
+	return func() error {
+		if toClose != nil {
+			close(toClose)
+			toClose = nil
+		}
+		return g.Wait()
+	}
+
+}
+
+func newPeriodicProgressFlusher(settings *cluster.Settings) PeriodicMergeProgressFlusher {
+	clock := timeutil.DefaultTimeSource{}
+	getCheckpointInterval := func() time.Duration {
+		return backfill.IndexBackfillCheckpointInterval.Get(&settings.SV)
+	}
+	// fractionInterval is copied from the logic in existing backfill code.
+	// TODO(ajwerner): Add a cluster setting to control this.
+	const fractionInterval = 10 * time.Second
+	getFractionInterval := func() time.Duration { return fractionInterval }
+	return PeriodicMergeProgressFlusher{
+		clock:              clock,
+		checkpointInterval: getCheckpointInterval,
+		fractionInterval:   getFractionInterval,
+	}
 }
