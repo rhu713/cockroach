@@ -12,16 +12,13 @@ package sql
 
 import (
 	"context"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
-	"golang.org/x/sync/errgroup"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -31,13 +28,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/errors"
+	"golang.org/x/sync/errgroup"
 )
 
+// IndexBackfillerMergePlanner holds dependencies for the merge step of the
+// index backfiller.
 type IndexBackfillerMergePlanner struct {
 	execCfg   *ExecutorConfig
 	ieFactory sqlutil.SessionBoundInternalExecutorFactory
 }
 
+// NewIndexBackfillerMergePlanner creates a new IndexBackfillerMergePlanner.
 func NewIndexBackfillerMergePlanner(
 	execCfg *ExecutorConfig, ieFactory sqlutil.SessionBoundInternalExecutorFactory,
 ) *IndexBackfillerMergePlanner {
@@ -56,8 +59,6 @@ func (im *IndexBackfillerMergePlanner) plan(
 	var evalCtx extendedEvalContext
 	var planCtx *PlanningCtx
 
-	// The txn is used to fetch a tableDesc, partition the spans and set the
-	// evalCtx ts all of which is during planning of the DistSQL flow.
 	if err := DescsTxn(ctx, im.execCfg, func(
 		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
 	) error {
@@ -101,13 +102,27 @@ func (im *IndexBackfillerMergePlanner) plan(
 	}, nil
 }
 
+// MergeProgress tracks the progress for an index backfill merge.
 type MergeProgress struct {
-	todoSpans                      [][]roachpb.Span
-	mutationIdx                    []int
-	readTimestamp                  hlc.Timestamp
-	addedIndexes, temporaryIndexes []descpb.IndexID
+	// TodoSpans contains the all the spans for all  the temporary indexes
+	// that still need to be merged.
+	TodoSpans [][]roachpb.Span
+
+	// MutationIdx contains the indexes of the mutations for the temporary indexes
+	// in the list of mutations.
+	MutationIdx []int
+
+	// ReadTimestamp is the timestamp above which all writes in the temporary
+	// indexes must be merged back into their corresponding added index.
+	ReadTimestamp hlc.Timestamp
+
+	// AddedIndexes and TemporaryIndexes contain the index IDs for all newly added
+	// indexes and their corresponding temporary index.
+	AddedIndexes, TemporaryIndexes []descpb.IndexID
 }
 
+// IndexMergeTracker abstracts the infrastructure to read and write merge
+// progress to job state.
 type IndexMergeTracker struct {
 	mu struct {
 		syncutil.Mutex
@@ -115,16 +130,19 @@ type IndexMergeTracker struct {
 	}
 }
 
+// NewIndexMergeTracker creates a new IndexMergeTracker
 func NewIndexMergeTracker(progress *MergeProgress) *IndexMergeTracker {
 	imt := IndexMergeTracker{}
 	imt.mu.progress = progress
 	return &imt
 }
 
+// FlushCheckpoint writes out a checkpoint containing any data which has been
+// previously set via SetMergeProgress
 func (imt *IndexMergeTracker) FlushCheckpoint(ctx context.Context, job *jobs.Job) error {
-	updatedTodoSpans := imt.GetProgress()
+	progress := imt.GetMergeProgress()
 
-	if updatedTodoSpans.todoSpans == nil {
+	if progress.TodoSpans == nil {
 		return nil
 	}
 
@@ -133,13 +151,14 @@ func (imt *IndexMergeTracker) FlushCheckpoint(ctx context.Context, job *jobs.Job
 		return errors.Errorf("expected SchemaChangeDetails job type, got %T", job.Details())
 	}
 
-	for idx := range updatedTodoSpans.todoSpans {
-		details.ResumeSpanList[updatedTodoSpans.mutationIdx[idx]].ResumeSpans = updatedTodoSpans.todoSpans[idx]
+	for idx := range progress.TodoSpans {
+		details.ResumeSpanList[progress.MutationIdx[idx]].ResumeSpans = progress.TodoSpans[idx]
 	}
 
 	return job.SetDetails(ctx, nil, details)
 }
 
+// FlushFractionCompleted writes out the fraction completed.
 func (imt *IndexMergeTracker) FlushFractionCompleted(ctx context.Context) error {
 	// TODO(rui): The backfiller currently doesn't have a good way to report the
 	// total progress of mutations that occur in multiple stages that
@@ -149,23 +168,30 @@ func (imt *IndexMergeTracker) FlushFractionCompleted(ctx context.Context) error 
 	return nil
 }
 
-func (imt *IndexMergeTracker) UpdateMergeProgress(ctx context.Context, progress *MergeProgress) {
+// SetMergeProgress sets the progress for all index merges. Setting the progress
+// does not make that progress durable as the tracker may invoke FlushCheckpoint
+// later.
+func (imt *IndexMergeTracker) SetMergeProgress(ctx context.Context, progress *MergeProgress) {
 	imt.mu.Lock()
 	imt.mu.progress = progress
 	imt.mu.Unlock()
 }
 
-func (imt *IndexMergeTracker) GetProgress() *MergeProgress {
+// GetMergeProgress reads the current merge progress.
+func (imt *IndexMergeTracker) GetMergeProgress() *MergeProgress {
 	imt.mu.Lock()
 	defer imt.mu.Unlock()
 	return imt.mu.progress
 }
 
+// PeriodicMergeProgressFlusher is used to write the updates to merge progress
+// periodically.
 type PeriodicMergeProgressFlusher struct {
 	clock                                timeutil.TimeSource
 	checkpointInterval, fractionInterval func() time.Duration
 }
 
+// StartPeriodicUpdates starts the periodic updates for the progress flusher.
 func (p *PeriodicMergeProgressFlusher) StartPeriodicUpdates(
 	ctx context.Context, tracker *IndexMergeTracker, job *jobs.Job,
 ) (stop func() error) {
@@ -222,7 +248,6 @@ func newPeriodicProgressFlusher(settings *cluster.Settings) PeriodicMergeProgres
 		return backfill.IndexBackfillCheckpointInterval.Get(&settings.SV)
 	}
 	// fractionInterval is copied from the logic in existing backfill code.
-	// TODO(ajwerner): Add a cluster setting to control this.
 	const fractionInterval = 10 * time.Second
 	getFractionInterval := func() time.Duration { return fractionInterval }
 	return PeriodicMergeProgressFlusher{

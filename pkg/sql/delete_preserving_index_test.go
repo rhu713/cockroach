@@ -12,9 +12,6 @@ package sql_test
 
 import (
 	"context"
-	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"reflect"
 	"sync"
 	"testing"
@@ -25,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
@@ -32,6 +30,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/rowencpb"
@@ -532,8 +532,9 @@ func TestMergeProcessor(t *testing.T) {
 			return nil
 		}))
 
-		_, err = im.Merge(context.Background(), codec, tableDesc, srcIndex.GetID(), dstIndex.GetID(), []roachpb.Span{tableDesc.IndexSpan(codec, srcIndex.GetID())},
-			hlc.Timestamp{})
+		sp := tableDesc.IndexSpan(codec, srcIndex.GetID())
+		_, err = im.Merge(context.Background(), codec, tableDesc, srcIndex.GetID(), dstIndex.GetID(), sp.Key, sp.EndKey,
+			hlc.Timestamp{}, 1000)
 		if err != nil {
 			t.Fatal(err)
 		}

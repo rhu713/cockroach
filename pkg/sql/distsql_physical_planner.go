@@ -950,8 +950,12 @@ func (dsp *DistSQLPlanner) PartitionSpans(
 	return sp, err
 }
 
+// PartitionSpansWithUserData splits the spans according to owning nodes just
+// like PartitionSpans, but also allows the spans to be associated with
+// arbitrary data. The data duplicated whenever a span is split so that the
+// splits of a span is always associated with the original span's data.
 func (dsp *DistSQLPlanner) PartitionSpansWithUserData(
-	planCtx *PlanningCtx, spans roachpb.Spans, userData []interface{},
+	planCtx *PlanningCtx, spans []roachpb.Span, userData []interface{},
 ) ([]SpanPartition, [][]interface{}, error) {
 	if len(spans) == 0 {
 		panic("no spans")

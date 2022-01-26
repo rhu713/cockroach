@@ -248,10 +248,10 @@ func (sc *SchemaChanger) runBackfill(ctx context.Context) error {
 		if m.Adding() {
 			if col := m.AsColumn(); col != nil {
 				needColumnBackfill = catalog.ColumnNeedsBackfill(col)
-			} else if idx := m.AsIndex(); idx != nil && idx.Backfilling() {
+			} else if idx := m.AsIndex(); idx != nil && !idx.UseDeletePreservingEncoding() {
 				addedIndexSpans = append(addedIndexSpans, tableDesc.IndexSpan(sc.execCfg.Codec, idx.GetID()))
 				addedIndexes = append(addedIndexes, idx.GetID())
-			} else if idx := m.AsIndex(); idx != nil && !idx.Backfilling() {
+			} else if idx := m.AsIndex(); idx != nil && idx.UseDeletePreservingEncoding() {
 				// temporary index, the backfiller
 				// uses these and will move them to
 				// dropping when it is done.
@@ -2772,8 +2772,8 @@ func (sc *SchemaChanger) distIndexMerge(
 		return err
 	}
 
-	log.VEventf(ctx, 2, "indexbackfill merge: initial resume spans %+v", progress.todoSpans)
-	if progress.todoSpans == nil {
+	log.VEventf(ctx, 2, "indexbackfill merge: initial resume spans %+v", progress.TodoSpans)
+	if progress.TodoSpans == nil {
 		return nil
 	}
 
@@ -2792,13 +2792,13 @@ func (sc *SchemaChanger) distIndexMerge(
 				idxCompletedSpans[spanIdx] = append(idxCompletedSpans[spanIdx], sp)
 			}
 
-			currentProgress := tracker.GetProgress()
+			currentProgress := tracker.GetMergeProgress()
 
 			for idx, completedSpans := range idxCompletedSpans {
-				currentProgress.todoSpans[idx] = roachpb.SubtractSpans(currentProgress.todoSpans[idx], completedSpans)
+				currentProgress.TodoSpans[idx] = roachpb.SubtractSpans(currentProgress.TodoSpans[idx], completedSpans)
 			}
 
-			tracker.UpdateMergeProgress(ctx, currentProgress)
+			tracker.SetMergeProgress(ctx, currentProgress)
 		}
 		return nil
 	}
@@ -2806,8 +2806,8 @@ func (sc *SchemaChanger) distIndexMerge(
 	stop := periodicFlusher.StartPeriodicUpdates(ctx, tracker, sc.job)
 	defer func() { _ = stop() }()
 
-	run, err := planner.plan(ctx, tableDesc, progress.readTimestamp, progress.todoSpans, progress.addedIndexes,
-		progress.temporaryIndexes, metaFn)
+	run, err := planner.plan(ctx, tableDesc, progress.ReadTimestamp, progress.TodoSpans, progress.AddedIndexes,
+		progress.TemporaryIndexes, metaFn)
 	if err != nil {
 		return err
 	}
@@ -2827,14 +2827,18 @@ func (sc *SchemaChanger) distIndexMerge(
 	return tracker.FlushFractionCompleted(ctx)
 }
 
-func extractMergeProgress(job *jobs.Job, tableDesc catalog.TableDescriptor, readTimestamp hlc.Timestamp,
-	addedIndexes, temporaryIndexes []descpb.IndexID) (*MergeProgress, error) {
+func extractMergeProgress(
+	job *jobs.Job,
+	tableDesc catalog.TableDescriptor,
+	readTimestamp hlc.Timestamp,
+	addedIndexes, temporaryIndexes []descpb.IndexID,
+) (*MergeProgress, error) {
 
 	resumeSpanList := job.Details().(jobspb.SchemaChangeDetails).ResumeSpanList
 	progress := MergeProgress{}
-	progress.temporaryIndexes = temporaryIndexes
-	progress.addedIndexes = addedIndexes
-	progress.readTimestamp = readTimestamp
+	progress.TemporaryIndexes = temporaryIndexes
+	progress.AddedIndexes = addedIndexes
+	progress.ReadTimestamp = readTimestamp
 
 	const noIdx = -1
 	findMutIdx := func(id descpb.IndexID) int {
@@ -2853,8 +2857,8 @@ func extractMergeProgress(job *jobs.Job, tableDesc catalog.TableDescriptor, read
 			return nil, errors.AssertionFailedf("no corresponding mutation for temporary index %d", tempIdx)
 		}
 
-		progress.todoSpans = append(progress.todoSpans, resumeSpanList[mutIdx].ResumeSpans)
-		progress.mutationIdx = append(progress.mutationIdx, mutIdx)
+		progress.TodoSpans = append(progress.TodoSpans, resumeSpanList[mutIdx].ResumeSpans)
+		progress.MutationIdx = append(progress.MutationIdx, mutIdx)
 	}
 
 	return &progress, nil
