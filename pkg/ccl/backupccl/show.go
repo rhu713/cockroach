@@ -166,23 +166,14 @@ func (m manifestInfoReader) showBackup(
 
 type metadataSSTInfoReader struct{}
 
-var _ backupInfoReader = manifestInfoReader{}
-
-func (m metadataSSTInfoReader) header() colinfo.ResultColumns {
-	return colinfo.ResultColumns{
-		{Name: "file", Typ: types.String},
-		{Name: "key", Typ: types.String},
-		{Name: "detail", Typ: types.Jsonb},
-	}
-}
-
 func (m metadataSSTInfoReader) showBackup(
 	ctx context.Context,
+	mem *mon.BoundAccount,
 	store cloud.ExternalStorage,
+	incStore cloud.ExternalStorage,
 	enc *jobspb.BackupEncryptionOptions,
 	incPaths []string,
-	resultsCh chan<- tree.Datums,
-) error {
+	resultsCh chan<- tree.Datums) error {
 	filename := metadataSSTName
 	push := func(_, readable string, value json.JSON) error {
 		val := tree.DNull
@@ -208,6 +199,17 @@ func (m metadataSSTInfoReader) showBackup(
 		}
 	}
 	return nil
+}
+
+var _ backupInfoReader = manifestInfoReader{}
+var _ backupInfoReader = metadataSSTInfoReader{}
+
+func (m metadataSSTInfoReader) header() colinfo.ResultColumns {
+	return colinfo.ResultColumns{
+		{Name: "file", Typ: types.String},
+		{Name: "key", Typ: types.String},
+		{Name: "detail", Typ: types.Jsonb},
+	}
 }
 
 // showBackupPlanHook implements PlanHookFn.

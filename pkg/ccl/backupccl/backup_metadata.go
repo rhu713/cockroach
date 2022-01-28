@@ -503,7 +503,7 @@ func pbBytesToJSON(in []byte, msg protoutil.Message) (json.JSON, error) {
 	if err := protoutil.Unmarshal(in, msg); err != nil {
 		return nil, err
 	}
-	j, err := protoreflect.MessageToJSON(msg, false)
+	j, err := protoreflect.MessageToJSON(msg, protoreflect.FmtFlags{})
 	if err != nil {
 		return nil, err
 	}
