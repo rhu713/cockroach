@@ -162,7 +162,7 @@ VERBOSE :=
 DESTDIR :=
 
 DUPLFLAGS    := -t 100
-GOFLAGS      :=
+GOFLAGS      := -gcflags='all=-N -l'
 TAGS         :=
 ARCHIVE      := cockroach.src.tgz
 STARTFLAGS   := -s type=mem,size=1GiB --logtostderr

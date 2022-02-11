@@ -271,7 +271,7 @@ func fullClusterTargets(
 }
 
 func fullClusterTargetsRestore(
-	allDescs []catalog.Descriptor, lastBackupManifest BackupManifest,
+	allDescs []catalog.Descriptor, lastBackupManifest BackupManifestV2,
 ) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
 	fullClusterDescs, fullClusterDBs, err := fullClusterTargets(allDescs)
 	var filteredDescs []catalog.Descriptor
@@ -289,7 +289,17 @@ func fullClusterTargetsRestore(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return filteredDescs, filteredDBs, lastBackupManifest.GetTenants(), nil
+	tenants := make([]descpb.TenantInfoWithUsage, 0, 1)
+	it := lastBackupManifest.TenantIter()
+	ok, err := it.Next()
+	for ; ok; ok, err = it.Next() {
+		tenant, err := it.Cur()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		tenants = append(tenants, tenant)
+	}
+	return filteredDescs, filteredDBs, tenants, err
 }
 
 // fullClusterTargetsBackup returns the same descriptors referenced in
@@ -329,25 +339,38 @@ func fullClusterTargetsBackup(
 func selectTargets(
 	ctx context.Context,
 	p sql.PlanHookState,
-	backupManifests []BackupManifest,
+	backupManifests []BackupManifestV2,
 	targets tree.TargetList,
 	descriptorCoverage tree.DescriptorCoverage,
 	asOf hlc.Timestamp,
 ) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
-	allDescs, lastBackupManifest := loadSQLDescsFromBackupsAtTime(backupManifests, asOf)
+	allDescs, lastBackupManifest, err := loadSQLDescsFromBackupsAtTime(backupManifests, asOf)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	if descriptorCoverage == tree.AllDescriptors {
 		return fullClusterTargetsRestore(allDescs, lastBackupManifest)
 	}
 
 	if targets.Tenant != (roachpb.TenantID{}) {
-		for _, tenant := range lastBackupManifest.GetTenants() {
+		it := lastBackupManifest.TenantIter()
+		ok, err := it.Next()
+		for ; ok; ok, err = it.Next() {
+			tenant, err := it.Cur()
+			if err != nil {
+				return nil, nil, nil, err
+			}
 			// TODO(dt): for now it is zero-or-one but when that changes, we should
 			// either keep it sorted or build a set here.
 			if tenant.ID == targets.Tenant.ToUint64() {
 				return nil, nil, []descpb.TenantInfoWithUsage{tenant}, nil
 			}
 		}
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
 		return nil, nil, nil, errors.Errorf("tenant %d not in backup", targets.Tenant.ToUint64())
 	}
 
@@ -389,7 +412,7 @@ type BackupTableEntry struct {
 func MakeBackupTableEntry(
 	ctx context.Context,
 	fullyQualifiedTableName string,
-	backupManifests []BackupManifest,
+	backupManifests []BackupManifestV2,
 	endTime hlc.Timestamp,
 	user security.SQLUsername,
 	backupCodec keys.SQLCodec,
@@ -421,7 +444,10 @@ func MakeBackupTableEntry(
 		backupManifests = backupManifests[:ind+1]
 	}
 
-	allDescs, _ := loadSQLDescsFromBackupsAtTime(backupManifests, endTime)
+	allDescs, _, err := loadSQLDescsFromBackupsAtTime(backupManifests, endTime)
+	if err != nil {
+		return BackupTableEntry{}, err
+	}
 	resolver, err := backupresolver.NewDescriptorResolver(allDescs)
 	if err != nil {
 		return BackupTableEntry{}, errors.Wrapf(err, "creating a new resolver for all descriptors")
@@ -445,18 +471,24 @@ func MakeBackupTableEntry(
 
 	tablePrimaryIndexSpan := tbDesc.PrimaryIndexSpan(backupCodec)
 
-	if err := checkCoverage(ctx, []roachpb.Span{tablePrimaryIndexSpan}, backupManifests); err != nil {
+	if err := checkCoverageRestore(ctx, []roachpb.Span{tablePrimaryIndexSpan}, backupManifests); err != nil {
 		return BackupTableEntry{}, errors.Wrapf(err, "making spans for table %s", fullyQualifiedTableName)
 	}
 
-	entry := makeSimpleImportSpans(
+	entry, err := makeSimpleImportSpans(
 		[]roachpb.Span{tablePrimaryIndexSpan},
 		backupManifests,
 		nil,           /*backupLocalityInfo*/
 		roachpb.Key{}, /*lowWaterMark*/
 	)
+	if err != nil {
+		return BackupTableEntry{}, err
+	}
 
-	lastSchemaChangeTime := findLastSchemaChangeTime(backupManifests, tbDesc, endTime)
+	lastSchemaChangeTime, err := findLastSchemaChangeTime(backupManifests, tbDesc, endTime)
+	if err != nil {
+		return BackupTableEntry{}, err
+	}
 
 	backupTableEntry := BackupTableEntry{
 		tbDesc,
@@ -473,14 +505,32 @@ func MakeBackupTableEntry(
 }
 
 func findLastSchemaChangeTime(
-	backupManifests []BackupManifest, tbDesc catalog.TableDescriptor, endTime hlc.Timestamp,
-) hlc.Timestamp {
+	backupManifests []BackupManifestV2, tbDesc catalog.TableDescriptor, endTime hlc.Timestamp,
+) (hlc.Timestamp, error) {
 	lastSchemaChangeTime := endTime
 	for i := len(backupManifests) - 1; i >= 0; i-- {
 		manifest := backupManifests[i]
-		for j := len(manifest.DescriptorChanges) - 1; j >= 0; j-- {
-			rev := manifest.DescriptorChanges[j]
+		// TODO: this requires revisions to be sorted by time, which is not what the
+		// revision SST is sorted by at the moment.
+		revs := make([]*BackupManifest_DescriptorRevision, 0, 1)
+		it := manifest.DescriptorChangesIter()
+		ok, err := it.Next()
+		for ; ok; ok, err = it.Next() {
+			rev, err := it.Cur()
+			if err != nil {
+				return hlc.Timestamp{}, err
+			}
+			revs = append(revs, &rev)
+		}
+		if err != nil {
+			return hlc.Timestamp{}, err
+		}
+		sort.Slice(revs, func(i, j int) bool {
+			return revs[i].Time.Less(revs[j].Time)
+		})
 
+		for j := len(revs) - 1; j >= 0; j-- {
+			rev := revs[j]
 			if endTime.LessEq(rev.Time) {
 				continue
 			}
@@ -489,13 +539,13 @@ func findLastSchemaChangeTime(
 				d := descbuilder.NewBuilder(rev.Desc).BuildExistingMutable()
 				revDesc, _ := catalog.AsTableDescriptor(d)
 				if !reflect.DeepEqual(revDesc.PublicColumns(), tbDesc.PublicColumns()) {
-					return lastSchemaChangeTime
+					return lastSchemaChangeTime, nil
 				}
 				lastSchemaChangeTime = rev.Time
 			}
 		}
 	}
-	return lastSchemaChangeTime
+	return lastSchemaChangeTime, nil
 }
 
 // checkMultiRegionCompatible checks if the given table is compatible to be

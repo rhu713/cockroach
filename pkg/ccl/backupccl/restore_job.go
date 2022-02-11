@@ -298,7 +298,7 @@ func restoreWithRetry(
 	restoreCtx context.Context,
 	execCtx sql.JobExecContext,
 	numNodes int,
-	backupManifests []BackupManifest,
+	backupManifests []BackupManifestV2,
 	backupLocalityInfo []jobspb.RestoreDetails_BackupLocalityInfo,
 	endTime hlc.Timestamp,
 	dataToRestore restorationData,
@@ -377,7 +377,7 @@ func restore(
 	restoreCtx context.Context,
 	execCtx sql.JobExecContext,
 	numNodes int,
-	backupManifests []BackupManifest,
+	backupManifests []BackupManifestV2,
 	backupLocalityInfo []jobspb.RestoreDetails_BackupLocalityInfo,
 	endTime hlc.Timestamp,
 	dataToRestore restorationData,
@@ -417,7 +417,7 @@ func restore(
 		return emptyRowCount, errors.Wrap(err, "resolving locality locations")
 	}
 
-	if err := checkCoverage(restoreCtx, dataToRestore.getSpans(), backupManifests); err != nil {
+	if err := checkCoverageRestore(restoreCtx, dataToRestore.getSpans(), backupManifests); err != nil {
 		return emptyRowCount, err
 	}
 
@@ -425,8 +425,11 @@ func restore(
 	// which are grouped by keyrange.
 	highWaterMark := job.Progress().Details.(*jobspb.Progress_Restore).Restore.HighWater
 
-	importSpans := makeSimpleImportSpans(dataToRestore.getSpans(), backupManifests, backupLocalityMap,
+	importSpans, err := makeSimpleImportSpans(dataToRestore.getSpans(), backupManifests, backupLocalityMap,
 		highWaterMark)
+	if err != nil {
+		return emptyRowCount, err
+	}
 
 	if len(importSpans) == 0 {
 		// There are no files to restore.
@@ -568,14 +571,17 @@ func loadBackupSQLDescs(
 	p sql.JobExecContext,
 	details jobspb.RestoreDetails,
 	encryption *jobspb.BackupEncryptionOptions,
-) ([]BackupManifest, BackupManifest, []catalog.Descriptor, int64, error) {
+) ([]BackupManifestV2, BackupManifestV2, []catalog.Descriptor, int64, error) {
 	backupManifests, sz, err := loadBackupManifests(ctx, mem, details.URIs,
 		p.User(), p.ExecCfg().DistSQLSrv.ExternalStorageFromURI, encryption)
 	if err != nil {
-		return nil, BackupManifest{}, nil, 0, err
+		return nil, BackupManifestV2{}, nil, 0, err
 	}
 
-	allDescs, latestBackupManifest := loadSQLDescsFromBackupsAtTime(backupManifests, details.EndTime)
+	allDescs, latestBackupManifest, err := loadSQLDescsFromBackupsAtTime(backupManifests, details.EndTime)
+	if err != nil {
+		return nil, BackupManifestV2{}, nil, 0, err
+	}
 
 	for _, m := range details.DatabaseModifiers {
 		for _, typ := range m.ExtraTypeDescs {
@@ -599,7 +605,7 @@ func loadBackupSQLDescs(
 
 	if err := maybeUpgradeDescriptors(sqlDescs, true /* skipFKsWithNoMatchingTable */); err != nil {
 		mem.Shrink(ctx, sz)
-		return nil, BackupManifest{}, nil, 0, err
+		return nil, BackupManifestV2{}, nil, 0, err
 	}
 
 	return backupManifests, latestBackupManifest, sqlDescs, sz, nil
@@ -641,28 +647,21 @@ func getStatisticsFromBackup(
 	ctx context.Context,
 	exportStore cloud.ExternalStorage,
 	encryption *jobspb.BackupEncryptionOptions,
-	backup BackupManifest,
+	backup BackupManifestV2,
 ) ([]*stats.TableStatisticProto, error) {
-	// This part deals with pre-20.2 stats format where backup statistics
-	// are stored as a field in backup manifests instead of in their
-	// individual files.
-	if backup.DeprecatedStatistics != nil {
-		return backup.DeprecatedStatistics, nil
-	}
-	tableStatistics := make([]*stats.TableStatisticProto, 0, len(backup.StatisticsFilenames))
-	uniqueFileNames := make(map[string]struct{})
-	for _, fname := range backup.StatisticsFilenames {
-		if _, exists := uniqueFileNames[fname]; !exists {
-			uniqueFileNames[fname] = struct{}{}
-			myStatsTable, err := readTableStatistics(ctx, exportStore, fname, encryption)
-			if err != nil {
-				return tableStatistics, err
-			}
-			tableStatistics = append(tableStatistics, myStatsTable.Statistics...)
+	tableStatistics := make([]*stats.TableStatisticProto, 0, 1)
+	it := backup.StatsIter()
+	ok, err := it.Next()
+	for ; ok; ok, err = it.Next() {
+		stat, err := it.Cur()
+		if err != nil {
+			return nil, err
 		}
+
+		tableStatistics = append(tableStatistics, &stat)
 	}
 
-	return tableStatistics, nil
+	return tableStatistics, err
 }
 
 // remapRelevantStatistics changes the table ID references in the stats
@@ -1396,10 +1395,27 @@ func (r *restoreResumer) doResume(ctx context.Context, execCtx interface{}) erro
 	backupTenantID := roachpb.SystemTenantID
 
 	if len(sqlDescs) != 0 {
-		if len(latestBackupManifest.Spans) != 0 && !latestBackupManifest.HasTenants() {
+		spanIt := latestBackupManifest.SpanIter()
+		defer spanIt.Close()
+		hasSpan, err := spanIt.Next()
+		if err != nil {
+			return err
+		}
+		tenantIt := latestBackupManifest.TenantIter()
+		defer tenantIt.Close()
+		hasTenant, err := tenantIt.Next()
+		if err != nil {
+			return err
+		}
+
+		if hasSpan && !hasTenant {
 			// If there are no tenant targets, then the entire keyspace covered by
 			// Spans must lie in 1 tenant.
-			_, backupTenantID, err = keys.DecodeTenantPrefix(latestBackupManifest.Spans[0].Key)
+			s, err := spanIt.Cur()
+			if err != nil {
+				return err
+			}
+			_, backupTenantID, err = keys.DecodeTenantPrefix(s.Key)
 			if err != nil {
 				return err
 			}

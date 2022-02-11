@@ -602,7 +602,7 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Name() == backupManifestName || !strings.HasSuffix(path, ".sst") {
+		if info.Name() == backupManifestName || !strings.HasSuffix(path, ".sst") || strings.HasSuffix(path, metadataSSTName) {
 			return nil
 		}
 		return os.Remove(path)

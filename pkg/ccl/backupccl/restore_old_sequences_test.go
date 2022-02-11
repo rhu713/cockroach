@@ -42,6 +42,9 @@ import (
 func TestRestoreOldSequences(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	t.Skip("old manifest")
+
 	var (
 		testdataBase = testutils.TestDataPath(t, "restore_old_sequences")
 		exportDirs   = testdataBase + "/exports"

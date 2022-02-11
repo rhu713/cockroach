@@ -11,6 +11,7 @@ package backupccl
 import (
 	"context"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descbuilder"
 	"go/constant"
 	"net/url"
 	"path"
@@ -37,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descidgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
@@ -1899,9 +1899,16 @@ func doRestorePlan(
 	wasOffline := make(map[tableAndIndex]hlc.Timestamp)
 
 	for _, m := range mainBackupManifests {
-		spans := roachpb.Spans(m.Spans)
-		for i := range m.Descriptors {
-			table, _, _, _ := descpb.FromDescriptor(&m.Descriptors[i])
+		descIter := m.DescIter()
+		dok, err := descIter.Next()
+
+		for ; dok; dok, err = descIter.Next() {
+			d, err := descIter.Cur()
+			if err != nil {
+				return err
+			}
+
+			table, _, _, _ := descpb.FromDescriptor(&d)
 			if table == nil {
 				continue
 			}
@@ -1909,19 +1916,31 @@ func doRestorePlan(
 			if len(index.Interleave.Ancestors) > 0 || len(index.InterleavedBy) > 0 {
 				return errors.Errorf("restoring interleaved tables is no longer allowed. table %s was found to be interleaved", table.Name)
 			}
+			// TODO: N_span iteration loop here.
 			if err := catalog.ForEachNonDropIndex(
 				tabledesc.NewBuilder(table).BuildImmutable().(catalog.TableDescriptor),
 				func(index catalog.Index) error {
-					if index.Adding() && spans.ContainsKey(p.ExecCfg().Codec.IndexPrefix(uint32(table.ID), uint32(index.GetID()))) {
-						k := tableAndIndex{tableID: table.ID, indexID: index.GetID()}
-						if _, ok := wasOffline[k]; !ok {
-							wasOffline[k] = m.EndTime
+					if index.Adding() {
+						spanIter := m.SpanIter()
+						ok, err := spanIter.ContainsKey(p.ExecCfg().Codec.IndexPrefix(uint32(table.ID), uint32(index.GetID())))
+						if err != nil {
+							return err
+						}
+						if ok {
+							k := tableAndIndex{tableID: table.ID, indexID: index.GetID()}
+							if _, ok := wasOffline[k]; !ok {
+								wasOffline[k] = m.EndTime
+							}
 						}
 					}
 					return nil
 				}); err != nil {
 				return err
 			}
+		}
+
+		if err != nil {
+			return err
 		}
 	}
 

@@ -162,7 +162,8 @@ func writeDescsToMetadata(ctx context.Context, sst storage.SSTWriter, m *BackupM
 			k := encodeDescSSTKey(i.ID)
 			var b []byte
 			if i.Desc != nil {
-				if t := i.Desc.GetTable(); t == nil || !t.Dropped() {
+				t, _, _, _ := descpb.FromDescriptor(i.Desc)
+				if t == nil || !t.Dropped() {
 					bytes, err := protoutil.Marshal(i.Desc)
 					if err != nil {
 						return err
@@ -186,7 +187,7 @@ func writeDescsToMetadata(ctx context.Context, sst storage.SSTWriter, m *BackupM
 			// It does not really matter what time we put the descriptors at for a
 			// non-rev-history backup -- we could put them at 0 or at end-time, since
 			// any RESTORE will be reading as of end-time which would be >= both.
-			sst.PutMVCC(storage.MVCCKey{Key: k, Timestamp: m.EndTime}, b)
+			sst.PutUnversioned(k, b)
 		}
 	}
 	return nil
@@ -248,12 +249,13 @@ func writeNamesToMetadata(ctx context.Context, sst storage.SSTWriter, m *BackupM
 	for i, rev := range revs {
 		names[i].id = rev.ID
 		names[i].ts = rev.Time
-		if db := rev.Desc.GetDatabase(); db != nil {
+		tb, db, typ, sc := descpb.FromDescriptor(rev.Desc)
+		if db != nil {
 			names[i].name = db.Name
-		} else if sc := rev.Desc.GetSchema(); sc != nil {
+		} else if sc != nil {
 			names[i].name = sc.Name
 			names[i].parent = sc.ParentID
-		} else if tb := rev.Desc.GetTable(); tb != nil {
+		} else if tb != nil {
 			names[i].name = tb.Name
 			names[i].parent = tb.ParentID
 			names[i].parentSchema = keys.PublicSchemaID
@@ -263,7 +265,7 @@ func writeNamesToMetadata(ctx context.Context, sst storage.SSTWriter, m *BackupM
 			if tb.Dropped() {
 				names[i].id = 0
 			}
-		} else if typ := rev.Desc.GetType(); typ != nil {
+		} else if typ != nil {
 			names[i].name = typ.Name
 			names[i].parent = typ.ParentID
 			names[i].parentSchema = typ.ParentSchemaID

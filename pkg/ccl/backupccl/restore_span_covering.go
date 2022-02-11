@@ -9,8 +9,6 @@
 package backupccl
 
 import (
-	"sort"
-
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
@@ -51,17 +49,17 @@ func (ie intervalSpan) Range() interval.Range {
 // This example is tested in TestRestoreEntryCoverExample.
 func makeSimpleImportSpans(
 	requiredSpans []roachpb.Span,
-	backups []BackupManifest,
+	backups []BackupManifestV2,
 	backupLocalityMap map[int]storeByLocalityKV,
 	lowWaterMark roachpb.Key,
-) []execinfrapb.RestoreSpanEntry {
+) ([]execinfrapb.RestoreSpanEntry, error) {
 	if len(backups) < 1 {
-		return nil
+		return nil, nil
 	}
 
-	for i := range backups {
-		sort.Sort(BackupFileDescriptors(backups[i].Files))
-	}
+	//for i := range backups {
+	//	sort.Sort(BackupFileDescriptors(backups[i].Files))
+	//}
 
 	var cover []execinfrapb.RestoreSpanEntry
 	for _, span := range requiredSpans {
@@ -77,7 +75,13 @@ func makeSimpleImportSpans(
 		for layer := range backups {
 			covPos := spanCoverStart
 			// TODO(dt): binary search to the first file in required span?
-			for _, f := range backups[layer].Files {
+			it := backups[layer].FileIter()
+			ok, err := it.Next()
+			for ; ok; ok, err = it.Next() {
+				f, err := it.Cur()
+				if err != nil {
+					return nil, err
+				}
 				if sp := span.Intersect(f.Span); sp.Valid() {
 					fileSpec := execinfrapb.RestoreFileSpec{Path: f.Path, Dir: backups[layer].Dir}
 					if dir, ok := backupLocalityMap[layer][f.LocalityKV]; ok {
@@ -111,10 +115,13 @@ func makeSimpleImportSpans(
 					break
 				}
 			}
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	return cover
+	return cover, nil
 }
 
 func makeEntry(start, end roachpb.Key, f execinfrapb.RestoreFileSpec) execinfrapb.RestoreSpanEntry {

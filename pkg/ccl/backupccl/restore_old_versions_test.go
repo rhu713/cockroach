@@ -64,6 +64,7 @@ import (
 func TestRestoreOldVersions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	t.Skip("old manifest")
 	testdataBase := testutils.TestDataPath(t, "restore_old_versions")
 	var (
 		exportDirsWithoutInterleave = testdataBase + "/exports-without-interleaved"
@@ -671,6 +672,7 @@ func TestCreateIncBackupMissingIndexEntries(t *testing.T) {
 // of the mentioned PR.
 func TestRestoreOldBackupMissingOfflineIndexes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	t.Skip("old manifest")
 	skip.UnderRace(t, "times out under race cause it starts up two test servers")
 	ctx := context.Background()
 
@@ -745,6 +747,7 @@ func TestRestoreOldBackupMissingOfflineIndexes(t *testing.T) {
 func TestRestoreWithDroppedSchemaCorruption(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	t.Skip("old manifest")
 	ctx := context.Background()
 
 	backupDir := testutils.TestDataPath(t, "restore_with_dropped_schema", "exports", "v20.2.7")

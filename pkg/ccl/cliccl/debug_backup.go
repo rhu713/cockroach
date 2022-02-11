@@ -39,10 +39,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -50,7 +48,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -284,7 +281,7 @@ func externalStorageFromURIFactory(
 		defaultSettings, newBlobFactory, user, nil /*Internal Executor*/, nil /*kvDB*/)
 }
 
-func getManifestFromURI(ctx context.Context, path string) (backupccl.BackupManifest, error) {
+func getManifestFromURI(ctx context.Context, path string) (backupccl.BackupManifestV2, error) {
 
 	if !strings.Contains(path, "://") {
 		path = nodelocal.MakeLocalStorageURI(path)
@@ -293,10 +290,10 @@ func getManifestFromURI(ctx context.Context, path string) (backupccl.BackupManif
 	// upgraded from the old FK representation, or even older formats). If more
 	// fields are added to the output, the table descriptors may need to be
 	// upgraded.
-	backupManifest, _, err := backupccl.ReadBackupManifestFromURI(ctx, nil /* mem */, path, security.RootUserName(),
+	backupManifest, _, err := backupccl.ReadSlimBackupManifestFromURI(ctx, nil /* mem */, path, security.RootUserName(),
 		externalStorageFromURIFactory, nil)
 	if err != nil {
-		return backupccl.BackupManifest{}, err
+		return backupccl.BackupManifestV2{}, err
 	}
 	return backupManifest, nil
 }
@@ -413,7 +410,7 @@ func runExportDataCmd(cmd *cobra.Command, args []string) error {
 	manifestPaths := args
 
 	ctx := context.Background()
-	manifests := make([]backupccl.BackupManifest, 0, len(manifestPaths))
+	manifests := make([]backupccl.BackupManifestV2, 0, len(manifestPaths))
 	for _, path := range manifestPaths {
 		manifest, err := getManifestFromURI(ctx, path)
 		if err != nil {
@@ -454,7 +451,7 @@ func runExportDataCmd(cmd *cobra.Command, args []string) error {
 }
 
 func evalAsOfTimestamp(
-	readTime string, manifests []backupccl.BackupManifest,
+	readTime string, manifests []backupccl.BackupManifestV2,
 ) (hlc.Timestamp, error) {
 	if readTime == "" {
 		return manifests[len(manifests)-1].EndTime, nil
@@ -677,7 +674,7 @@ func processEntryFiles(
 	return nil
 }
 
-type backupMetaDisplayMsg backupccl.BackupManifest
+type backupMetaDisplayMsg backupccl.BackupManifestV2
 type backupFileDisplayMsg backupccl.BackupManifest_File
 
 func (f backupFileDisplayMsg) MarshalJSON() ([]byte, error) {
@@ -697,84 +694,91 @@ func (f backupFileDisplayMsg) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fileDisplayMsg)
 }
 
-func (b backupMetaDisplayMsg) MarshalJSON() ([]byte, error) {
-
-	fileMsg := make([]backupFileDisplayMsg, len(b.Files))
-	for i, file := range b.Files {
-		fileMsg[i] = backupFileDisplayMsg(file)
-	}
-
-	displayMsg := struct {
-		StartTime           string
-		EndTime             string
-		DataSize            string
-		Rows                int64
-		IndexEntries        int64
-		FormatVersion       uint32
-		ClusterID           uuid.UUID
-		NodeID              roachpb.NodeID
-		BuildInfo           string
-		Files               []backupFileDisplayMsg
-		Spans               string
-		DatabaseDescriptors map[descpb.ID]string
-		TableDescriptors    map[descpb.ID]string
-		TypeDescriptors     map[descpb.ID]string
-		SchemaDescriptors   map[descpb.ID]string
-	}{
-		StartTime:           timeutil.Unix(0, b.StartTime.WallTime).Format(time.RFC3339),
-		EndTime:             timeutil.Unix(0, b.EndTime.WallTime).Format(time.RFC3339),
-		DataSize:            string(humanizeutil.IBytes(b.EntryCounts.DataSize)),
-		Rows:                b.EntryCounts.Rows,
-		IndexEntries:        b.EntryCounts.IndexEntries,
-		FormatVersion:       b.FormatVersion,
-		ClusterID:           b.ClusterID,
-		NodeID:              b.NodeID,
-		BuildInfo:           b.BuildInfo.Short(),
-		Files:               fileMsg,
-		Spans:               fmt.Sprint(b.Spans),
-		DatabaseDescriptors: make(map[descpb.ID]string),
-		TableDescriptors:    make(map[descpb.ID]string),
-		TypeDescriptors:     make(map[descpb.ID]string),
-		SchemaDescriptors:   make(map[descpb.ID]string),
-	}
-
-	dbIDToName := make(map[descpb.ID]string)
-	schemaIDToFullyQualifiedName := make(map[descpb.ID]string)
-	schemaIDToFullyQualifiedName[keys.PublicSchemaIDForBackup] = catconstants.PublicSchemaName
-	typeIDToFullyQualifiedName := make(map[descpb.ID]string)
-	tableIDToFullyQualifiedName := make(map[descpb.ID]string)
-
-	for i := range b.Descriptors {
-		d := &b.Descriptors[i]
-		id := descpb.GetDescriptorID(d)
-		tableDesc, databaseDesc, typeDesc, schemaDesc := descpb.FromDescriptor(d)
-		if databaseDesc != nil {
-			dbIDToName[id] = descpb.GetDescriptorName(d)
-		} else if schemaDesc != nil {
-			dbName := dbIDToName[schemaDesc.GetParentID()]
-			schemaName := descpb.GetDescriptorName(d)
-			schemaIDToFullyQualifiedName[id] = dbName + "." + schemaName
-		} else if typeDesc != nil {
-			parentSchema := schemaIDToFullyQualifiedName[typeDesc.GetParentSchemaID()]
-			if parentSchema == catconstants.PublicSchemaName {
-				parentSchema = dbIDToName[typeDesc.GetParentID()] + "." + parentSchema
-			}
-			typeName := descpb.GetDescriptorName(d)
-			typeIDToFullyQualifiedName[id] = parentSchema + "." + typeName
-		} else if tableDesc != nil {
-			tbDesc := tabledesc.NewBuilder(tableDesc).BuildImmutable()
-			parentSchema := schemaIDToFullyQualifiedName[tbDesc.GetParentSchemaID()]
-			if parentSchema == catconstants.PublicSchemaName {
-				parentSchema = dbIDToName[tableDesc.GetParentID()] + "." + parentSchema
-			}
-			tableName := descpb.GetDescriptorName(d)
-			tableIDToFullyQualifiedName[id] = parentSchema + "." + tableName
-		}
-	}
-	displayMsg.DatabaseDescriptors = dbIDToName
-	displayMsg.TableDescriptors = tableIDToFullyQualifiedName
-	displayMsg.SchemaDescriptors = schemaIDToFullyQualifiedName
-	displayMsg.TypeDescriptors = typeIDToFullyQualifiedName
-
-	return json.Marshal(displayMsg)
-}
+//func (b backupMetaDisplayMsg) MarshalJSON() ([]byte, error) {
+//	fileMsg := make([]backupFileDisplayMsg, 0, 1)
+//	for i := b.FileIter(); i.HasNext(); {
+//		file := i.Next()
+//		fileMsg = append(fileMsg, backupFileDisplayMsg(file))
+//	}
+//
+//	spans := make([]roachpb.Span, 0, 1)
+//	for i := interface{}(&b).(*backupccl.BackupManifestV2).SpanIter(); i.HasNext(); {
+//		span := i.Next()
+//		spans = append(spans, span)
+//	}
+//
+//	displayMsg := struct {
+//		StartTime           string
+//		EndTime             string
+//		DataSize            string
+//		Rows                int64
+//		IndexEntries        int64
+//		FormatVersion       uint32
+//		ClusterID           uuid.UUID
+//		NodeID              roachpb.NodeID
+//		BuildInfo           string
+//		Files               []backupFileDisplayMsg
+//		Spans               string
+//		DatabaseDescriptors map[descpb.ID]string
+//		TableDescriptors    map[descpb.ID]string
+//		TypeDescriptors     map[descpb.ID]string
+//		SchemaDescriptors   map[descpb.ID]string
+//	}{
+//		StartTime:           timeutil.Unix(0, b.StartTime.WallTime).Format(time.RFC3339),
+//		EndTime:             timeutil.Unix(0, b.EndTime.WallTime).Format(time.RFC3339),
+//		DataSize:            string(humanizeutil.IBytes(b.EntryCounts.DataSize)),
+//		Rows:                b.EntryCounts.Rows,
+//		IndexEntries:        b.EntryCounts.IndexEntries,
+//		FormatVersion:       b.FormatVersion,
+//		ClusterID:           b.ClusterID,
+//		NodeID:              b.NodeID,
+//		BuildInfo:           b.BuildInfo.Short(),
+//		Files:               fileMsg,
+//		Spans:               fmt.Sprint(spans),
+//		DatabaseDescriptors: make(map[descpb.ID]string),
+//		TableDescriptors:    make(map[descpb.ID]string),
+//		TypeDescriptors:     make(map[descpb.ID]string),
+//		SchemaDescriptors:   make(map[descpb.ID]string),
+//	}
+//
+//	dbIDToName := make(map[descpb.ID]string)
+//	schemaIDToFullyQualifiedName := make(map[descpb.ID]string)
+//	schemaIDToFullyQualifiedName[keys.PublicSchemaIDForBackup] = catconstants.PublicSchemaName
+//	typeIDToFullyQualifiedName := make(map[descpb.ID]string)
+//	tableIDToFullyQualifiedName := make(map[descpb.ID]string)
+//
+//	for i := interface{}(&b).(*backupccl.BackupManifestV2).DescIter(); i.HasNext(); {
+//		desc := i.Next()
+//		d := &desc
+//		id := descpb.GetDescriptorID(d)
+//		tableDesc, databaseDesc, typeDesc, schemaDesc := descpb.FromDescriptor(d)
+//		if databaseDesc != nil {
+//			dbIDToName[id] = descpb.GetDescriptorName(d)
+//		} else if schemaDesc != nil {
+//			dbName := dbIDToName[schemaDesc.GetParentID()]
+//			schemaName := descpb.GetDescriptorName(d)
+//			schemaIDToFullyQualifiedName[id] = dbName + "." + schemaName
+//		} else if typeDesc != nil {
+//			parentSchema := schemaIDToFullyQualifiedName[typeDesc.GetParentSchemaID()]
+//			if parentSchema == catconstants.PublicSchemaName {
+//				parentSchema = dbIDToName[typeDesc.GetParentID()] + "." + parentSchema
+//			}
+//			typeName := descpb.GetDescriptorName(d)
+//			typeIDToFullyQualifiedName[id] = parentSchema + "." + typeName
+//		} else if tableDesc != nil {
+//			tbDesc := tabledesc.NewBuilder(tableDesc).BuildImmutable()
+//			parentSchema := schemaIDToFullyQualifiedName[tbDesc.GetParentSchemaID()]
+//			if parentSchema == catconstants.PublicSchemaName {
+//				parentSchema = dbIDToName[tableDesc.GetParentID()] + "." + parentSchema
+//			}
+//			tableName := descpb.GetDescriptorName(d)
+//			tableIDToFullyQualifiedName[id] = parentSchema + "." + tableName
+//		}
+//	}
+//	displayMsg.DatabaseDescriptors = dbIDToName
+//	displayMsg.TableDescriptors = tableIDToFullyQualifiedName
+//	displayMsg.SchemaDescriptors = schemaIDToFullyQualifiedName
+//	displayMsg.TypeDescriptors = typeIDToFullyQualifiedName
+//
+//	return json.Marshal(displayMsg)
+//}
