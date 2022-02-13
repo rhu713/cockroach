@@ -236,6 +236,10 @@ func backup(
 				if err != nil {
 					log.Errorf(ctx, "unable to checkpoint backup descriptor: %+v", err)
 				}
+				err = writeBackupMetadataSST(ctx, defaultStore, encryption, backupManifest, backupManifestCheckpointName, nil)
+				if err != nil {
+					log.Errorf(ctx, "unable to checkpoint backup descriptor manifest: %+v", err)
+				}
 
 				lastCheckpoint = timeutil.Now()
 			}
@@ -334,7 +338,7 @@ func backup(
 	}
 
 	if writeMetadataSST.Get(&settings.SV) {
-		if err := writeBackupMetadataSST(ctx, defaultStore, encryption, backupManifest, tableStatistics); err != nil {
+		if err := writeBackupMetadataSST(ctx, defaultStore, encryption, backupManifest, backupManifestName, tableStatistics); err != nil {
 			err = errors.Wrap(err, "writing forward-compat metadata sst")
 			if !build.IsRelease() {
 				return RowCount{}, err
@@ -642,6 +646,12 @@ func (b *backupResumer) readManifestOnResume(
 			mem.Shrink(ctx, memSize)
 			return nil, 0, errors.Wrapf(err, "renaming temp checkpoint file")
 		}
+
+		err = writeBackupMetadataSST(ctx, defaultStore, details.EncryptionOptions, &desc, backupManifestCheckpointName, nil)
+		if err != nil {
+			log.Errorf(ctx, "unable to checkpoint backup descriptor manifest: %+v", err)
+		}
+
 		// Best effort remove temp checkpoint.
 		if err := defaultStore.Delete(ctx, tmpCheckpoint); err != nil {
 			log.Errorf(ctx, "error removing temporary checkpoint %s", tmpCheckpoint)

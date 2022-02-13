@@ -44,11 +44,20 @@ const (
 	sstTenantsPrefix = "tenant/"
 )
 
+func getMetadataSSTName(prefix string) string {
+	if prefix == "" {
+		return metadataSSTName
+	}
+
+	return fmt.Sprintf("%s-%s", prefix, metadataSSTName)
+}
+
 func writeBackupMetadataSST(
 	ctx context.Context,
 	dest cloud.ExternalStorage,
 	enc *jobspb.BackupEncryptionOptions,
 	manifest *BackupManifest,
+	prefix string,
 	stats []*stats.TableStatisticProto,
 ) error {
 	var w io.WriteCloser
@@ -60,7 +69,7 @@ func writeBackupMetadataSST(
 		}
 	}()
 
-	w, err := dest.Writer(ctx, metadataSSTName)
+	w, err := dest.Writer(ctx, getMetadataSSTName(prefix))
 	if err != nil {
 		return err
 	}

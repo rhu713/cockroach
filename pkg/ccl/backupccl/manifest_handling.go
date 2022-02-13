@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 	"net/url"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -373,12 +372,7 @@ func readSlimBackupManifest(
 		encOpts = &roachpb.FileEncryptionOptions{Key: key}
 	}
 
-	sstFileName := metadataSSTName
-	prefix := filepath.Dir(filename)
-	if prefix != "" {
-		sstFileName = path.Join(prefix, sstFileName)
-	}
-
+	sstFileName := getMetadataSSTName(filename)
 	iter, err := storageccl.ExternalSSTReader(ctx, exportStore, sstFileName, encOpts)
 	if err != nil {
 		return BackupManifestV2{}, 0, err
@@ -398,9 +392,9 @@ func readSlimBackupManifest(
 		return BackupManifestV2{}, 0, err
 	}
 
-	backupManifest := BackupManifestV2{BackupManifest: sstManifest, ctx: ctx, store: exportStore, enc: encOpts, filename: sstFileName}
+	backupManifest := BackupManifestV2{BackupManifest: sstManifest, store: exportStore, enc: encOpts, sstName: sstFileName}
 
-	it := backupManifest.DescIter()
+	it := backupManifest.DescIter(ctx)
 	for ok, err = it.Next(); ok; ok, err = it.Next() {
 		d, err := it.Cur()
 		if err != nil {
@@ -1068,13 +1062,13 @@ func getBackupIndexAtTime(backupManifests []BackupManifestV2, asOf hlc.Timestamp
 }
 
 func loadSQLDescsFromBackupsAtTime(
-	backupManifests []BackupManifestV2, asOf hlc.Timestamp,
+	ctx context.Context, backupManifests []BackupManifestV2, asOf hlc.Timestamp,
 ) ([]catalog.Descriptor, BackupManifestV2, error) {
 	lastBackupManifest := backupManifests[len(backupManifests)-1]
 
 	unwrapDescriptors := func(m *BackupManifestV2) ([]catalog.Descriptor, error) {
 		ret := make([]catalog.Descriptor, 0, 1)
-		it := m.DescIter()
+		it := m.DescIter(ctx)
 		ok, err := it.Next()
 		for ; ok; ok, err = it.Next() {
 			desc, err := it.Cur()
@@ -1108,7 +1102,7 @@ func loadSQLDescsFromBackupsAtTime(
 	// TODO: this requires revisions to be sorted by time, which is not what the
 	// revision SST is sorted by at the moment.
 	descriptorChanges := make([]*BackupManifest_DescriptorRevision, 0, 1)
-	it := lastBackupManifest.DescriptorChangesIter()
+	it := lastBackupManifest.DescriptorChangesIter(ctx)
 	ok, err := it.Next()
 	for ; ok; ok, err = it.Next() {
 		rev, err := it.Cur()
@@ -1305,8 +1299,7 @@ func ListFullBackupsInCollection(
 
 type BackupManifestV2 struct {
 	BackupManifest
-	ctx      context.Context
-	store    cloud.ExternalStorage
-	enc      *roachpb.FileEncryptionOptions
-	filename string
+	store   cloud.ExternalStorage
+	enc     *roachpb.FileEncryptionOptions
+	sstName string
 }

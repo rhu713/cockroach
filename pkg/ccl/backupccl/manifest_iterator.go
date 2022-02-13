@@ -209,8 +209,8 @@ func (si *StatsIterator) Cur() (stats.TableStatisticProto, error) {
 	return s, nil
 }
 
-func (b *BackupManifestV2) SpanIter() SpanIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstSpansPrefix), b.enc, true)
+func (b *BackupManifestV2) SpanIter(ctx context.Context) SpanIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstSpansPrefix), b.enc, true)
 	if err != nil {
 		// TODO: return this
 		panic(err)
@@ -221,8 +221,8 @@ func (b *BackupManifestV2) SpanIter() SpanIterator {
 	}
 }
 
-func (b *BackupManifestV2) IntroducedSpanIter() SpanIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstSpansPrefix), b.enc, false)
+func (b *BackupManifestV2) IntroducedSpanIter(ctx context.Context) SpanIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstSpansPrefix), b.enc, false)
 	if err != nil {
 		// TODO: return this
 		panic(err)
@@ -236,8 +236,8 @@ func (b *BackupManifestV2) IntroducedSpanIter() SpanIterator {
 	}
 }
 
-func (b *BackupManifestV2) FileIter() FileIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstFilesPrefix), b.enc, false)
+func (b *BackupManifestV2) FileIter(ctx context.Context) FileIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstFilesPrefix), b.enc, false)
 	if err != nil {
 		// TODO: return this
 		panic(err)
@@ -248,8 +248,8 @@ func (b *BackupManifestV2) FileIter() FileIterator {
 	}
 }
 
-func (b *BackupManifestV2) DescIter() DescIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstDescsPrefix), b.enc, true)
+func (b *BackupManifestV2) DescIter(ctx context.Context) DescIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstDescsPrefix), b.enc, true)
 	if err != nil {
 		// TODO: return this
 		panic(err)
@@ -260,8 +260,8 @@ func (b *BackupManifestV2) DescIter() DescIterator {
 	}
 }
 
-func (b *BackupManifestV2) TenantIter() TenantIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstTenantsPrefix), b.enc, false)
+func (b *BackupManifestV2) TenantIter(ctx context.Context) TenantIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstTenantsPrefix), b.enc, false)
 	if err != nil {
 		// TODO: return this
 		panic(err)
@@ -272,8 +272,8 @@ func (b *BackupManifestV2) TenantIter() TenantIterator {
 	}
 }
 
-func (b *BackupManifestV2) DescriptorChangesIter() DescriptorRevisionIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstDescsPrefix), b.enc, false)
+func (b *BackupManifestV2) DescriptorChangesIter(ctx context.Context) DescriptorRevisionIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstDescsPrefix), b.enc, false)
 	if err != nil {
 		// TODO: return this
 		panic(err)
@@ -284,8 +284,8 @@ func (b *BackupManifestV2) DescriptorChangesIter() DescriptorRevisionIterator {
 	}
 }
 
-func (b *BackupManifestV2) StatsIter() StatsIterator {
-	backing, err := makeBytesIter(b.ctx, b.store, b.filename, []byte(sstStatsPrefix), b.enc, false)
+func (b *BackupManifestV2) StatsIter(ctx context.Context) StatsIterator {
+	backing, err := makeBytesIter(ctx, b.store, b.sstName, []byte(sstStatsPrefix), b.enc, false)
 	if err != nil {
 		// TODO: return this
 		panic(err)

@@ -174,7 +174,7 @@ func (m metadataSSTInfoReader) showBackup(
 	enc *jobspb.BackupEncryptionOptions,
 	incPaths []string,
 	resultsCh chan<- tree.Datums) error {
-	filename := metadataSSTName
+	filename := getMetadataSSTName(backupManifestName)
 	push := func(_, readable string, value json.JSON) error {
 		val := tree.DNull
 		if value != nil {
@@ -193,7 +193,7 @@ func (m metadataSSTInfoReader) showBackup(
 	}
 
 	for _, i := range incPaths {
-		filename = strings.TrimSuffix(i, backupManifestName) + metadataSSTName
+		filename = getMetadataSSTName(i)
 		if err := DebugDumpMetadataSST(ctx, store, filename, enc, push); err != nil {
 			return err
 		}

@@ -9,6 +9,7 @@
 package backupccl
 
 import (
+	"context"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
@@ -48,6 +49,7 @@ func (ie intervalSpan) Range() interval.Range {
 //  [l, m): 9
 // This example is tested in TestRestoreEntryCoverExample.
 func makeSimpleImportSpans(
+	ctx context.Context,
 	requiredSpans []roachpb.Span,
 	backups []BackupManifestV2,
 	backupLocalityMap map[int]storeByLocalityKV,
@@ -75,7 +77,7 @@ func makeSimpleImportSpans(
 		for layer := range backups {
 			covPos := spanCoverStart
 			// TODO(dt): binary search to the first file in required span?
-			it := backups[layer].FileIter()
+			it := backups[layer].FileIter(ctx)
 			ok, err := it.Next()
 			for ; ok; ok, err = it.Next() {
 				f, err := it.Cur()

@@ -1899,7 +1899,7 @@ func doRestorePlan(
 	wasOffline := make(map[tableAndIndex]hlc.Timestamp)
 
 	for _, m := range mainBackupManifests {
-		descIter := m.DescIter()
+		descIter := m.DescIter(ctx)
 		dok, err := descIter.Next()
 
 		for ; dok; dok, err = descIter.Next() {
@@ -1921,7 +1921,7 @@ func doRestorePlan(
 				tabledesc.NewBuilder(table).BuildImmutable().(catalog.TableDescriptor),
 				func(index catalog.Index) error {
 					if index.Adding() {
-						spanIter := m.SpanIter()
+						spanIter := m.SpanIter(ctx)
 						ok, err := spanIter.ContainsKey(p.ExecCfg().Codec.IndexPrefix(uint32(table.ID), uint32(index.GetID())))
 						if err != nil {
 							return err

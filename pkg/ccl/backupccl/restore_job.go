@@ -425,7 +425,7 @@ func restore(
 	// which are grouped by keyrange.
 	highWaterMark := job.Progress().Details.(*jobspb.Progress_Restore).Restore.HighWater
 
-	importSpans, err := makeSimpleImportSpans(dataToRestore.getSpans(), backupManifests, backupLocalityMap,
+	importSpans, err := makeSimpleImportSpans(restoreCtx, dataToRestore.getSpans(), backupManifests, backupLocalityMap,
 		highWaterMark)
 	if err != nil {
 		return emptyRowCount, err
@@ -578,7 +578,7 @@ func loadBackupSQLDescs(
 		return nil, BackupManifestV2{}, nil, 0, err
 	}
 
-	allDescs, latestBackupManifest, err := loadSQLDescsFromBackupsAtTime(backupManifests, details.EndTime)
+	allDescs, latestBackupManifest, err := loadSQLDescsFromBackupsAtTime(ctx, backupManifests, details.EndTime)
 	if err != nil {
 		return nil, BackupManifestV2{}, nil, 0, err
 	}
@@ -650,7 +650,7 @@ func getStatisticsFromBackup(
 	backup BackupManifestV2,
 ) ([]*stats.TableStatisticProto, error) {
 	tableStatistics := make([]*stats.TableStatisticProto, 0, 1)
-	it := backup.StatsIter()
+	it := backup.StatsIter(ctx)
 	ok, err := it.Next()
 	for ; ok; ok, err = it.Next() {
 		stat, err := it.Cur()
@@ -1395,13 +1395,13 @@ func (r *restoreResumer) doResume(ctx context.Context, execCtx interface{}) erro
 	backupTenantID := roachpb.SystemTenantID
 
 	if len(sqlDescs) != 0 {
-		spanIt := latestBackupManifest.SpanIter()
+		spanIt := latestBackupManifest.SpanIter(ctx)
 		defer spanIt.Close()
 		hasSpan, err := spanIt.Next()
 		if err != nil {
 			return err
 		}
-		tenantIt := latestBackupManifest.TenantIter()
+		tenantIt := latestBackupManifest.TenantIter(ctx)
 		defer tenantIt.Close()
 		hasTenant, err := tenantIt.Next()
 		if err != nil {

@@ -271,7 +271,7 @@ func fullClusterTargets(
 }
 
 func fullClusterTargetsRestore(
-	allDescs []catalog.Descriptor, lastBackupManifest BackupManifestV2,
+	ctx context.Context, allDescs []catalog.Descriptor, lastBackupManifest BackupManifestV2,
 ) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
 	fullClusterDescs, fullClusterDBs, err := fullClusterTargets(allDescs)
 	var filteredDescs []catalog.Descriptor
@@ -290,7 +290,7 @@ func fullClusterTargetsRestore(
 		return nil, nil, nil, err
 	}
 	tenants := make([]descpb.TenantInfoWithUsage, 0, 1)
-	it := lastBackupManifest.TenantIter()
+	it := lastBackupManifest.TenantIter(ctx)
 	ok, err := it.Next()
 	for ; ok; ok, err = it.Next() {
 		tenant, err := it.Cur()
@@ -344,17 +344,17 @@ func selectTargets(
 	descriptorCoverage tree.DescriptorCoverage,
 	asOf hlc.Timestamp,
 ) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
-	allDescs, lastBackupManifest, err := loadSQLDescsFromBackupsAtTime(backupManifests, asOf)
+	allDescs, lastBackupManifest, err := loadSQLDescsFromBackupsAtTime(ctx, backupManifests, asOf)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
 	if descriptorCoverage == tree.AllDescriptors {
-		return fullClusterTargetsRestore(allDescs, lastBackupManifest)
+		return fullClusterTargetsRestore(ctx, allDescs, lastBackupManifest)
 	}
 
 	if targets.Tenant != (roachpb.TenantID{}) {
-		it := lastBackupManifest.TenantIter()
+		it := lastBackupManifest.TenantIter(ctx)
 		ok, err := it.Next()
 		for ; ok; ok, err = it.Next() {
 			tenant, err := it.Cur()
@@ -444,7 +444,7 @@ func MakeBackupTableEntry(
 		backupManifests = backupManifests[:ind+1]
 	}
 
-	allDescs, _, err := loadSQLDescsFromBackupsAtTime(backupManifests, endTime)
+	allDescs, _, err := loadSQLDescsFromBackupsAtTime(ctx, backupManifests, endTime)
 	if err != nil {
 		return BackupTableEntry{}, err
 	}
@@ -476,6 +476,7 @@ func MakeBackupTableEntry(
 	}
 
 	entry, err := makeSimpleImportSpans(
+		ctx,
 		[]roachpb.Span{tablePrimaryIndexSpan},
 		backupManifests,
 		nil,           /*backupLocalityInfo*/
@@ -485,7 +486,7 @@ func MakeBackupTableEntry(
 		return BackupTableEntry{}, err
 	}
 
-	lastSchemaChangeTime, err := findLastSchemaChangeTime(backupManifests, tbDesc, endTime)
+	lastSchemaChangeTime, err := findLastSchemaChangeTime(ctx, backupManifests, tbDesc, endTime)
 	if err != nil {
 		return BackupTableEntry{}, err
 	}
@@ -505,7 +506,7 @@ func MakeBackupTableEntry(
 }
 
 func findLastSchemaChangeTime(
-	backupManifests []BackupManifestV2, tbDesc catalog.TableDescriptor, endTime hlc.Timestamp,
+	ctx context.Context, backupManifests []BackupManifestV2, tbDesc catalog.TableDescriptor, endTime hlc.Timestamp,
 ) (hlc.Timestamp, error) {
 	lastSchemaChangeTime := endTime
 	for i := len(backupManifests) - 1; i >= 0; i-- {
@@ -513,7 +514,7 @@ func findLastSchemaChangeTime(
 		// TODO: this requires revisions to be sorted by time, which is not what the
 		// revision SST is sorted by at the moment.
 		revs := make([]*BackupManifest_DescriptorRevision, 0, 1)
-		it := manifest.DescriptorChangesIter()
+		it := manifest.DescriptorChangesIter(ctx)
 		ok, err := it.Next()
 		for ; ok; ok, err = it.Next() {
 			rev, err := it.Cur()

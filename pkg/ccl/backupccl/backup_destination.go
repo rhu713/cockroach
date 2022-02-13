@@ -38,7 +38,7 @@ func fetchPreviousBackups(
 	prevBackupURIs []string,
 	encryptionParams jobspb.BackupEncryptionOptions,
 	kmsEnv cloud.KMSEnv,
-) ([]BackupManifest, *jobspb.BackupEncryptionOptions, int64, error) {
+) ([]BackupManifestV2, *jobspb.BackupEncryptionOptions, int64, error) {
 	if len(prevBackupURIs) == 0 {
 		return nil, nil, 0, nil
 	}
@@ -196,8 +196,8 @@ func getBackupManifests(
 	makeCloudStorage cloud.ExternalStorageFromURIFactory,
 	backupURIs []string,
 	encryption *jobspb.BackupEncryptionOptions,
-) ([]BackupManifest, int64, error) {
-	manifests := make([]BackupManifest, len(backupURIs))
+) ([]BackupManifestV2, int64, error) {
+	manifests := make([]BackupManifestV2, len(backupURIs))
 	if len(backupURIs) == 0 {
 		return manifests, 0, nil
 	}
@@ -225,7 +225,7 @@ func getBackupManifests(
 			// but it will be safer for future code to avoid having older-style
 			// descriptors around.
 			uri := backupURIs[i]
-			desc, size, err := ReadBackupManifestFromURI(
+			desc, size, err := ReadSlimBackupManifestFromURI(
 				ctx, &subMem, uri, user, makeCloudStorage, encryption,
 			)
 			if err != nil {

@@ -821,7 +821,9 @@ func backupPlanHook(
 			); err != nil {
 				return errors.Wrapf(err, "writing checkpoint file")
 			}
-			return nil
+
+			return writeBackupMetadataSST(ctx, defaultStore, backupDetails.EncryptionOptions, &backupManifest,
+				tempCheckpointFileNameForJob(jobID), nil)
 		}
 
 		if err := planSchedulePTSChaining(ctx, p, &backupDetails, backupStmt); err != nil {
@@ -1097,7 +1099,7 @@ func planSchedulePTSChaining(
 func getReintroducedSpans(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	prevBackups []BackupManifest,
+	prevBackups []BackupManifestV2,
 	tables []catalog.TableDescriptor,
 	revs []BackupManifest_DescriptorRevision,
 	endTime hlc.Timestamp,
@@ -1106,12 +1108,23 @@ func getReintroducedSpans(
 
 	offlineInLastBackup := make(map[descpb.ID]struct{})
 	lastBackup := prevBackups[len(prevBackups)-1]
-	for _, desc := range lastBackup.Descriptors {
+
+	it := lastBackup.DescIter(ctx)
+	ok, err := it.Next()
+	for ; ok; ok, err = it.Next() {
 		// TODO(pbardea): Also check that lastWriteTime is set once those are
 		// populated on the table descriptor.
+		desc, err := it.Cur()
+		if err != nil {
+			return nil, err
+		}
+
 		if table, _, _, _ := descpb.FromDescriptor(&desc); table != nil && table.Offline() {
 			offlineInLastBackup[table.GetID()] = struct{}{}
 		}
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// If the table was offline in the last backup, but becomes PUBLIC, then it
@@ -1579,12 +1592,24 @@ func getBackupDetailAndManifest(
 	if len(prevBackups) > 0 {
 		tablesInPrev := make(map[descpb.ID]struct{})
 		dbsInPrev := make(map[descpb.ID]struct{})
-		rawDescs := prevBackups[len(prevBackups)-1].Descriptors
-		for i := range rawDescs {
-			if t, _, _, _ := descpb.FromDescriptor(&rawDescs[i]); t != nil {
+
+		it := prevBackups[len(prevBackups)-1].DescIter(ctx)
+		ok, err := it.Next()
+
+		for ; ok; ok, err = it.Next() {
+			rawDesc, err := it.Cur()
+			if err != nil {
+				return jobspb.BackupDetails{}, BackupManifest{}, err
+			}
+
+			if t, _, _, _ := descpb.FromDescriptor(&rawDesc); t != nil {
 				tablesInPrev[t.ID] = struct{}{}
 			}
 		}
+		if err != nil {
+			return jobspb.BackupDetails{}, BackupManifest{}, err
+		}
+
 		for _, d := range prevBackups[len(prevBackups)-1].CompleteDbs {
 			dbsInPrev[d] = struct{}{}
 		}
@@ -1600,7 +1625,21 @@ func getBackupDetailAndManifest(
 			}
 		}
 
-		newSpans = filterSpans(spans, prevBackups[len(prevBackups)-1].Spans)
+		prevSpans := make([]roachpb.Span, 0)
+		spanIt := prevBackups[len(prevBackups)-1].SpanIter(ctx)
+		ok, err = spanIt.Next()
+		for ; ok; ok, err = spanIt.Next() {
+			span, err := spanIt.Cur()
+			if err != nil {
+				return jobspb.BackupDetails{}, BackupManifest{}, err
+			}
+			prevSpans = append(prevSpans, span)
+		}
+		if err != nil {
+			return jobspb.BackupDetails{}, BackupManifest{}, err
+		}
+
+		newSpans = filterSpans(spans, prevSpans)
 
 		tableSpans, err := getReintroducedSpans(ctx, execCfg, prevBackups, tables, revs, endTime)
 		if err != nil {
@@ -1641,7 +1680,7 @@ func getBackupDetailAndManifest(
 
 	// Verify this backup on its prior chain cover its spans up to its end time,
 	// as restore would do if it tried to restore this backup.
-	if err := checkCoverage(ctx, spans, append(prevBackups, backupManifest)); err != nil {
+	if err := checkCoveragePlanning(ctx, prevBackups, &backupManifest, spans, newSpans); err != nil {
 		return jobspb.BackupDetails{}, BackupManifest{}, errors.Wrap(err, "new backup would not cover expected time")
 	}
 
