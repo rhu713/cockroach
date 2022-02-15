@@ -973,6 +973,8 @@ func loadSQLDescsFromBackupsAtTime(
 	}
 	if asOf.IsEmpty() {
 		if lastBackupManifest.DescriptorCoverage != tree.AllDescriptors {
+			fmt.Println("@@@ ret 1")
+
 			return unwrapDescriptors(lastBackupManifest.Descriptors), lastBackupManifest
 		}
 
@@ -990,6 +992,8 @@ func loadSQLDescsFromBackupsAtTime(
 		lastBackupManifest = b
 	}
 	if len(lastBackupManifest.DescriptorChanges) == 0 {
+		fmt.Println("@@@ ret 2")
+
 		return unwrapDescriptors(lastBackupManifest.Descriptors), lastBackupManifest
 	}
 
@@ -1026,6 +1030,8 @@ func loadSQLDescsFromBackupsAtTime(
 		}
 		allDescs = append(allDescs, desc)
 	}
+	fmt.Println("@@@ ret 3")
+
 	return allDescs, lastBackupManifest
 }
 

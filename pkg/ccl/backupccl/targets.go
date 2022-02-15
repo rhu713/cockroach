@@ -335,7 +335,8 @@ func selectTargets(
 	asOf hlc.Timestamp,
 ) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
 	allDescs, lastBackupManifest := loadSQLDescsFromBackupsAtTime(backupManifests, asOf)
-
+	fmt.Println("debug: allDescs")
+	print(allDescs)
 	if descriptorCoverage == tree.AllDescriptors {
 		return fullClusterTargetsRestore(allDescs, lastBackupManifest)
 	}
@@ -368,6 +369,14 @@ func selectTargets(
 	}
 
 	return matched.Descs, matched.RequestedDBs, nil, nil
+}
+
+func print(ds []catalog.Descriptor) {
+	for i, d := range ds {
+		js, _ := protoreflect.MessageToJSON(d.DescriptorProto(), protoreflect.FmtFlags{})
+
+		fmt.Println("debug: i", i, "->", js)
+	}
 }
 
 // EntryFiles is a group of sst files of a backup table range
