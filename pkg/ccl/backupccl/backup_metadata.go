@@ -196,7 +196,12 @@ func writeDescsToMetadata(ctx context.Context, sst storage.SSTWriter, m *BackupM
 			// It does not really matter what time we put the descriptors at for a
 			// non-rev-history backup -- we could put them at 0 or at end-time, since
 			// any RESTORE will be reading as of end-time which would be >= both.
-			sst.PutUnversioned(k, b)
+			if m.StartTime.IsEmpty() {
+				sst.PutUnversioned(k, b)
+			} else {
+				sst.PutMVCC(storage.MVCCKey{Key: k, Timestamp: m.StartTime}, b)
+			}
+
 		}
 	}
 	return nil
