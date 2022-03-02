@@ -293,19 +293,19 @@ func findIndexProblem(
 	return nil
 }
 
-func registerSchemaChangeIndexTPCC1000(r registry.Registry) {
-	r.Add(makeIndexAddTpccTest(r.MakeClusterSpec(5, spec.CPU(16)), 1000, time.Hour*2))
+func registerSchemaChangeIndexTPCC1000MVCC(r registry.Registry) {
+	r.Add(makeIndexAddTpccTest(r.MakeClusterSpec(5, spec.CPU(16)), 600, time.Hour*2))
 }
 
-func registerSchemaChangeIndexTPCC100(r registry.Registry) {
-	r.Add(makeIndexAddTpccTest(r.MakeClusterSpec(5), 100, time.Minute*15))
+func registerSchemaChangeIndexTPCC1000Old(r registry.Registry) {
+	r.Add(makeIndexAddTpccOld(r.MakeClusterSpec(5, spec.CPU(16)), 600, time.Hour*2))
 }
 
-func makeIndexAddTpccTest(
+func makeIndexAddTpccOld(
 	spec spec.ClusterSpec, warehouses int, length time.Duration,
 ) registry.TestSpec {
 	return registry.TestSpec{
-		Name:    fmt.Sprintf("schemachange/index/tpcc/w=%d", warehouses),
+		Name:    "schemachange/indexbackfiller/old",
 		Owner:   registry.OwnerSQLSchema,
 		Cluster: spec,
 		Timeout: length * 3,
@@ -317,6 +317,38 @@ func makeIndexAddTpccTest(
 				ExtraRunArgs: fmt.Sprintf("--wait=false --tolerate-errors --workers=%d", warehouses),
 				During: func(ctx context.Context) error {
 					return runAndLogStmts(ctx, t, c, "addindex", []string{
+						`SET SESSION sql.mvcc_compliant_index_creation.enabled = 'false';`,
+						`SELECT crdb_internal.set_vmodule('mvcc_index_merger=2');`,
+						`CREATE UNIQUE INDEX ON tpcc.order (o_entry_d, o_w_id, o_d_id, o_carrier_id, o_id);`,
+						`CREATE INDEX ON tpcc.order (o_carrier_id);`,
+						`CREATE INDEX ON tpcc.customer (c_last, c_first);`,
+					})
+				},
+				Duration:  length,
+				SetupType: usingImport,
+			})
+		},
+	}
+}
+
+func makeIndexAddTpccTest(
+	spec spec.ClusterSpec, warehouses int, length time.Duration,
+) registry.TestSpec {
+	return registry.TestSpec{
+		Name:    "schemachange/indexbackfiller/mvcc",
+		Owner:   registry.OwnerSQLSchema,
+		Cluster: spec,
+		Timeout: length * 3,
+		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			runTPCC(ctx, t, c, tpccOptions{
+				Warehouses: warehouses,
+				// We limit the number of workers because the default results in a lot
+				// of connections which can lead to OOM issues (see #40566).
+				ExtraRunArgs: fmt.Sprintf("--wait=false --tolerate-errors --workers=%d", warehouses),
+				During: func(ctx context.Context) error {
+					return runAndLogStmts(ctx, t, c, "addindex", []string{
+						//`SET SESSION sql.mvcc_compliant_index_creation.enabled = 'false';`,
+						`SELECT crdb_internal.set_vmodule('mvcc_index_merger=2');`,
 						`CREATE UNIQUE INDEX ON tpcc.order (o_entry_d, o_w_id, o_d_id, o_carrier_id, o_id);`,
 						`CREATE INDEX ON tpcc.order (o_carrier_id);`,
 						`CREATE INDEX ON tpcc.customer (c_last, c_first);`,
