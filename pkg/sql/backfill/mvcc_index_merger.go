@@ -12,6 +12,7 @@ package backfill
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -97,6 +98,9 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 	defer ibm.output.ProducerDone()
 	defer execinfra.SendTraceData(ctx, ibm.output)
 
+	// TODO: move this into spec
+	readAsOf := ibm.flowCtx.Cfg.DB.Clock().Now()
+
 	mu := struct {
 		syncutil.Mutex
 		completedSpans   []roachpb.Span
@@ -155,7 +159,7 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 			key := sp.Key
 			for key != nil {
 				nextKey, err := ibm.Merge(ctx, ibm.evalCtx.Codec, ibm.desc, ibm.spec.TemporaryIndexes[idx], ibm.spec.AddedIndexes[idx],
-					key, sp.EndKey)
+					key, sp.EndKey, readAsOf)
 				if err != nil {
 					return err
 				}
@@ -219,6 +223,7 @@ func (ibm *IndexBackfillMerger) Merge(
 	destinationID descpb.IndexID,
 	startKey roachpb.Key,
 	endKey roachpb.Key,
+	readAsOf hlc.Timestamp,
 ) (roachpb.Key, error) {
 	sourcePrefix := rowenc.MakeIndexKeyPrefix(codec, table.GetID(), sourceID)
 	prefixLen := len(sourcePrefix)
@@ -237,7 +242,11 @@ func (ibm *IndexBackfillMerger) Merge(
 	chunkBytes := indexBackfillMergeBatchBytes.Get(&ibm.evalCtx.Settings.SV)
 
 	var nextStart roachpb.Key
-	err := ibm.flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+	var br *roachpb.BatchResponse
+	if err := ibm.flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		if err := txn.SetFixedTimestamp(ctx, readAsOf); err != nil {
+			return err
+		}
 		// For now just grab all of the destination KVs and merge the corresponding entries.
 		log.Infof(ctx, "merging batch [%s, %s) into index %d", startKey, endKey, destinationID)
 		var ba roachpb.BatchRequest
@@ -255,11 +264,17 @@ func (ibm *IndexBackfillMerger) Merge(
 			},
 			ScanFormat: roachpb.KEY_VALUES,
 		})
-		br, pErr := txn.Send(ctx, ba)
+		var pErr *roachpb.Error
+		br, pErr = txn.Send(ctx, ba)
 		if pErr != nil {
 			return pErr.GoError()
 		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 
+	err := ibm.flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		resp := br.Responses[0].GetScan()
 		var deletedCount int
 		txn.AddCommitTrigger(func(ctx context.Context) {
@@ -275,11 +290,19 @@ func (ibm *IndexBackfillMerger) Merge(
 			return nil
 		}
 
-		wb := txn.NewBatch()
-		var memUsedInMerge int64
+		rb := txn.NewBatch()
 		for i := range resp.Rows {
 			sourceKV := &resp.Rows[i]
+			rb.Get(sourceKV.Key)
+		}
+		if err := txn.Run(ctx, rb); err != nil {
+			return err
+		}
 
+		wb := txn.NewBatch()
+		var memUsedInMerge int64
+		for i := range rb.Results {
+			sourceKV := &rb.Results[i].Rows[0]
 			if len(sourceKV.Key) < prefixLen {
 				return errors.Errorf("key for index entry %v does not start with prefix %v", sourceKV, sourcePrefix)
 			}
