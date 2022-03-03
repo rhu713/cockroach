@@ -89,6 +89,7 @@ const indexBackfillMergeProgressReportInterval = 10 * time.Second
 
 // Run runs the processor.
 func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
+	log.Info(ctx, "Run called")
 	opName := "IndexBackfillMerger"
 	ctx = logtags.AddTag(ctx, opName, int(ibm.spec.Table.ID))
 	ctx, span := execinfra.ProcessorSpan(ctx, opName)
@@ -120,6 +121,7 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 		ibm.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
 		return
 	}
+	log.Info(ctx, "after init called")
 
 	// stopProgress will be closed when there is no more progress to report.
 	stopProgress := make(chan struct{})
@@ -144,9 +146,11 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 		defer close(stopProgress)
 		// TODO(rui): some room for improvement on single threaded
 		// implementation, e.g. run merge for spec spans in parallel.
+		log.Info(ctx, "before spans")
 		for i := range ibm.spec.Spans {
 			sp := ibm.spec.Spans[i]
 			idx := ibm.spec.SpanIdx[i]
+			log.Infof(ctx, "merging span %v", sp)
 
 			key := sp.Key
 			for key != nil {
@@ -165,7 +169,9 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 					completedSpan.EndKey = nextKey
 				}
 
+				log.Infof(ctx, "before lock for span %v", sp)
 				mu.Lock()
+				log.Infof(ctx, "after lock for span %v", sp)
 				mu.completedSpans = append(mu.completedSpans, completedSpan)
 				mu.completedSpanIdx = append(mu.completedSpanIdx, idx)
 				mu.Unlock()
@@ -233,7 +239,7 @@ func (ibm *IndexBackfillMerger) Merge(
 	var nextStart roachpb.Key
 	err := ibm.flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		// For now just grab all of the destination KVs and merge the corresponding entries.
-		log.VInfof(ctx, 2, "merging batch [%s, %s) into index %d", startKey, endKey, destinationID)
+		log.Infof(ctx, "merging batch [%s, %s) into index %d", startKey, endKey, destinationID)
 		var ba roachpb.BatchRequest
 		ba.TargetBytes = chunkBytes
 		if err := ibm.boundAccount.Grow(ctx, chunkBytes); err != nil {

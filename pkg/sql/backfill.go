@@ -2020,6 +2020,7 @@ func (sc *SchemaChanger) backfillIndexes(
 			return err
 		}
 
+		log.Info(ctx, "Starting merge step of backfill")
 		if err := sc.mergeFromTemporaryIndex(ctx, version, addedIndexes, temporaryIndexes); err != nil {
 			return err
 		}
@@ -2659,7 +2660,7 @@ func (sc *SchemaChanger) distIndexMerge(
 		return err
 	}
 
-	log.VEventf(ctx, 2, "indexbackfill merge: initial resume spans %+v", progress.TodoSpans)
+	log.Infof(ctx, "indexbackfill merge: initial resume spans %+v", progress.TodoSpans)
 	if progress.TodoSpans == nil {
 		return nil
 	}
@@ -2693,19 +2694,23 @@ func (sc *SchemaChanger) distIndexMerge(
 	stop := periodicFlusher.StartPeriodicUpdates(ctx, tracker)
 	defer func() { _ = stop() }()
 
+	log.Infof(ctx, "indexbackfill merge: before plan")
 	run, err := planner.plan(ctx, tableDesc, progress.TodoSpans, progress.AddedIndexes,
 		progress.TemporaryIndexes, metaFn)
 	if err != nil {
 		return err
 	}
 
+	log.Infof(ctx, "indexbackfill merge: before run")
 	if err := run(ctx); err != nil {
 		return err
 	}
+	log.Infof(ctx, "indexbackfill merge: after run")
 
 	if err := stop(); err != nil {
 		return err
 	}
+	log.Infof(ctx, "indexbackfill merge: after stop")
 
 	if err := tracker.FlushCheckpoint(ctx); err != nil {
 		return err

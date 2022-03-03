@@ -108,6 +108,7 @@ case "${cmd}" in
     ;;
     ssh)
     echo "****************************************"
+    echo "${NAME}"
     echo "Hint: you should also be able to directly invoke:"
     echo "ssh ${FQNAME}"
     echo "  or"
@@ -115,6 +116,10 @@ case "${cmd}" in
     echo "instead of '$0 ssh'."
     echo "****************************************"
     gcloud compute ssh "${NAME}" --ssh-flag="-A" "$@"
+    ;;
+    scp)
+    echo "gcloud compute scp $@"
+    gcloud compute scp   "$@"
     ;;
     mosh)
     mosh "${FQNAME}"
