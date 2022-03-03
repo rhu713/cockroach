@@ -146,10 +146,10 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 		}
 	})
 
+	mergeCh := make(chan MergeChunk, 10)
+
 	g.GoCtx(func(ctx context.Context) error {
-		defer close(stopProgress)
-		// TODO(rui): some room for improvement on single threaded
-		// implementation, e.g. run merge for spec spans in parallel.
+		defer close(mergeCh)
 		log.Info(ctx, "before spans")
 		for i := range ibm.spec.Spans {
 			sp := ibm.spec.Spans[i]
@@ -158,37 +158,50 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 
 			key := sp.Key
 			for key != nil {
-				nextKey, err := ibm.Merge(ctx, ibm.evalCtx.Codec, ibm.desc, ibm.spec.TemporaryIndexes[idx], ibm.spec.AddedIndexes[idx],
-					key, sp.EndKey, readAsOf)
+				nextKey, err := ibm.Scan(ctx, idx, ibm.spec.AddedIndexes[idx], key, sp.EndKey, readAsOf, mergeCh)
 				if err != nil {
 					return err
 				}
-
-				completedSpan := roachpb.Span{}
-				if nextKey == nil {
-					completedSpan.Key = key
-					completedSpan.EndKey = sp.EndKey
-				} else {
-					completedSpan.Key = key
-					completedSpan.EndKey = nextKey
-				}
-
-				log.Infof(ctx, "before lock for span %v", sp)
-				mu.Lock()
-				log.Infof(ctx, "after lock for span %v", sp)
-				mu.completedSpans = append(mu.completedSpans, completedSpan)
-				mu.completedSpanIdx = append(mu.completedSpanIdx, idx)
-				mu.Unlock()
-
-				if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
-					if knobs != nil && knobs.PushesProgressEveryChunk {
-						pushProgress()
-					}
-				}
-
 				key = nextKey
 			}
 		}
+		return nil
+	})
+
+	numWorkers := 5
+
+	g.GoCtx(func(ctx context.Context) error {
+		defer close(stopProgress)
+		// TODO(rui): some room for improvement on single threaded
+		// implementation, e.g. run merge for spec spans in parallel.
+
+		for worker := 0; worker < numWorkers; worker++ {
+			g.GoCtx(func(ctx context.Context) error {
+				for mergeChunk := range mergeCh {
+					err := ibm.Merge(ctx, ibm.evalCtx.Codec, ibm.desc, ibm.spec.TemporaryIndexes[mergeChunk.spanIdx],
+						ibm.spec.AddedIndexes[mergeChunk.spanIdx], mergeChunk.keys, mergeChunk.completedSpan)
+					if err != nil {
+						return err
+					}
+
+					log.Infof(ctx, "before lock for span %v", mergeChunk.completedSpan)
+					mu.Lock()
+					log.Infof(ctx, "after lock for span %v", mergeChunk.completedSpan)
+					mu.completedSpans = append(mu.completedSpans, mergeChunk.completedSpan)
+					mu.completedSpanIdx = append(mu.completedSpanIdx, mergeChunk.spanIdx)
+					mu.Unlock()
+
+					if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
+						if knobs != nil && knobs.PushesProgressEveryChunk {
+							pushProgress()
+						}
+					}
+
+				}
+				return nil
+			})
+		}
+
 		return nil
 	})
 
@@ -213,24 +226,21 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 
 var _ execinfra.Processor = &IndexBackfillMerger{}
 
-// Merge merges the entries from startKey to endKey from the index with sourceID
-// into the index with destinationID, up to a maximum of chunkSize entries.
-func (ibm *IndexBackfillMerger) Merge(
+type MergeChunk struct {
+	completedSpan roachpb.Span
+	keys          []roachpb.Key
+	spanIdx       int32
+}
+
+func (ibm *IndexBackfillMerger) Scan(
 	ctx context.Context,
-	codec keys.SQLCodec,
-	table catalog.TableDescriptor,
-	sourceID descpb.IndexID,
+	spanIdx int32,
 	destinationID descpb.IndexID,
 	startKey roachpb.Key,
 	endKey roachpb.Key,
 	readAsOf hlc.Timestamp,
+	mergeCh chan MergeChunk,
 ) (roachpb.Key, error) {
-	sourcePrefix := rowenc.MakeIndexKeyPrefix(codec, table.GetID(), sourceID)
-	prefixLen := len(sourcePrefix)
-	destPrefix := rowenc.MakeIndexKeyPrefix(codec, table.GetID(), destinationID)
-
-	destKey := make([]byte, len(destPrefix))
-
 	if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
 		if knobs != nil && knobs.RunBeforeMergeChunk != nil {
 			if err := knobs.RunBeforeMergeChunk(startKey); err != nil {
@@ -251,10 +261,10 @@ func (ibm *IndexBackfillMerger) Merge(
 		log.Infof(ctx, "merging batch [%s, %s) into index %d", startKey, endKey, destinationID)
 		var ba roachpb.BatchRequest
 		ba.TargetBytes = chunkBytes
-		if err := ibm.boundAccount.Grow(ctx, chunkBytes); err != nil {
-			return errors.Errorf("failed to fetch keys to merge from temp index")
-		}
-		defer ibm.boundAccount.Shrink(ctx, chunkBytes)
+		//if err := ibm.boundAccount.Grow(ctx, chunkBytes); err != nil {
+		//	return errors.Errorf("failed to fetch keys to merge from temp index")
+		//}
+		//defer ibm.boundAccount.Shrink(ctx, chunkBytes)
 
 		ba.MaxSpanRequestKeys = chunkSize
 		ba.Add(&roachpb.ScanRequest{
@@ -274,26 +284,58 @@ func (ibm *IndexBackfillMerger) Merge(
 		return nil, err
 	}
 
+	resp := br.Responses[0].GetScan()
+	chunk := MergeChunk{
+		spanIdx: spanIdx,
+	}
+	if len(resp.Rows) == 0 {
+		chunk.completedSpan = roachpb.Span{Key: startKey, EndKey: endKey}
+	} else {
+		nextStart = resp.Rows[len(resp.Rows)-1].Key.Next()
+		chunk.completedSpan = roachpb.Span{Key: startKey, EndKey: nextStart}
+
+		for i := range resp.Rows {
+			chunk.keys = append(chunk.keys, resp.Rows[i].Key)
+		}
+	}
+	mergeCh <- chunk
+	return nextStart, nil
+}
+
+// Merge merges the entries from startKey to endKey from the index with sourceID
+// into the index with destinationID, up to a maximum of chunkSize entries.
+func (ibm *IndexBackfillMerger) Merge(
+	ctx context.Context,
+	codec keys.SQLCodec,
+	table catalog.TableDescriptor,
+	sourceID descpb.IndexID,
+	destinationID descpb.IndexID,
+	sourceKeys []roachpb.Key,
+	sourceSpan roachpb.Span,
+) error {
+	sourcePrefix := rowenc.MakeIndexKeyPrefix(codec, table.GetID(), sourceID)
+	prefixLen := len(sourcePrefix)
+	destPrefix := rowenc.MakeIndexKeyPrefix(codec, table.GetID(), destinationID)
+
+	destKey := make([]byte, len(destPrefix))
+
 	err := ibm.flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		resp := br.Responses[0].GetScan()
 		var deletedCount int
 		txn.AddCommitTrigger(func(ctx context.Context) {
-			log.VInfof(ctx, 2, "merged batch of %d keys (%d deletes) (nextStart: %s) (commit timestamp: %s)",
-				len(resp.Rows),
+			log.VInfof(ctx, 2, "merged batch of %d keys (%d deletes) (span: %s) (commit timestamp: %s)",
+				len(sourceKeys),
 				deletedCount,
-				nextStart,
+				sourceSpan,
 				txn.CommitTimestamp(),
 			)
 		})
-		if len(resp.Rows) == 0 {
-			nextStart = nil
+		if len(sourceKeys) == 0 {
 			return nil
 		}
 
 		rb := txn.NewBatch()
-		for i := range resp.Rows {
-			sourceKV := &resp.Rows[i]
-			rb.Get(sourceKV.Key)
+		for i := range sourceKeys {
+			rb.Get(sourceKeys[i])
 		}
 		if err := txn.Run(ctx, rb); err != nil {
 			return err
@@ -311,7 +353,7 @@ func (ibm *IndexBackfillMerger) Merge(
 			destKey = append(destKey, destPrefix...)
 			destKey = append(destKey, sourceKV.Key[prefixLen:]...)
 
-			mergedEntry, deleted, err := mergeEntry(&resp.Rows[i], destKey)
+			mergedEntry, deleted, err := mergeEntry(sourceKV, destKey)
 			if err != nil {
 				return err
 			}
@@ -319,28 +361,26 @@ func (ibm *IndexBackfillMerger) Merge(
 			if deleted {
 				deletedCount++
 				wb.Del(mergedEntry.Key)
-				if err := ibm.boundAccount.Grow(ctx, int64(len(mergedEntry.Key))); err != nil {
-					return errors.Errorf("failed to allocate space to merge delete from temp index")
-				}
+				//if err := ibm.boundAccount.Grow(ctx, int64(len(mergedEntry.Key))); err != nil {
+				//	return errors.Errorf("failed to allocate space to merge delete from temp index")
+				//}
 				memUsedInMerge += int64(len(mergedEntry.Key))
 			} else {
 				wb.Put(mergedEntry.Key, mergedEntry.Value)
-				if err := ibm.boundAccount.Grow(ctx, int64(len(mergedEntry.Key)+len(mergedEntry.Value.RawBytes))); err != nil {
-					return errors.Errorf("failed to allocate space to merge put from temp index")
-				}
+				//if err := ibm.boundAccount.Grow(ctx, int64(len(mergedEntry.Key)+len(mergedEntry.Value.RawBytes))); err != nil {
+				//	return errors.Errorf("failed to allocate space to merge put from temp index")
+				//}
 				memUsedInMerge += int64(len(mergedEntry.Key) + len(mergedEntry.Value.RawBytes))
 			}
 		}
-		defer ibm.boundAccount.Shrink(ctx, memUsedInMerge)
+		//defer ibm.boundAccount.Shrink(ctx, memUsedInMerge)
 		if err := txn.Run(ctx, wb); err != nil {
 			return err
 		}
 
-		nextStart = resp.Rows[len(resp.Rows)-1].Key.Next()
-
 		if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
 			if knobs != nil && knobs.RunDuringMergeTxn != nil {
-				if err := knobs.RunDuringMergeTxn(ctx, txn, startKey, endKey); err != nil {
+				if err := knobs.RunDuringMergeTxn(ctx, txn, sourceSpan.Key, sourceSpan.EndKey); err != nil {
 					return err
 				}
 			}
@@ -348,18 +388,14 @@ func (ibm *IndexBackfillMerger) Merge(
 		return nil
 	})
 
-	if err != nil {
-		return nil, err
-	}
-
-	return nextStart, nil
+	return err
 }
 
-func mergeEntry(sourceKV *roachpb.KeyValue, destKey roachpb.Key) (*kv.KeyValue, bool, error) {
+func mergeEntry(sourceKV *kv.KeyValue, destKey roachpb.Key) (*kv.KeyValue, bool, error) {
 	var destTagAndData []byte
 	var deleted bool
 
-	tempWrapper, err := rowenc.DecodeWrapper(&sourceKV.Value)
+	tempWrapper, err := rowenc.DecodeWrapper(sourceKV.Value)
 	if err != nil {
 		return nil, false, err
 	}

@@ -12,7 +12,6 @@ package sql_test
 
 import (
 	"context"
-	"math"
 	"reflect"
 	"sync"
 	"testing"
@@ -23,16 +22,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/rowencpb"
@@ -480,225 +475,225 @@ func compareVersionedValueWrappers(
 	return nil
 }
 
-// This test tests that the schema changer is able to merge entries from a
-// delete-preserving index into a regular index.
-func TestMergeProcessor(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	defer lease.TestingDisableTableLeases()()
-
-	params, _ := tests.CreateTestServerParams()
-
-	type TestCase struct {
-		name                   string
-		setupSQL               string
-		srcIndex               string
-		dstIndex               string
-		dstDataSQL             string
-		srcDataSQL             string
-		dstDataSQL2            string
-		dstContentsBeforeMerge [][]string
-		dstContentsAfterMerge  [][]string
-	}
-
-	testCases := []TestCase{
-		{
-			name: "unique index",
-			setupSQL: `CREATE DATABASE d;
-   CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-		UNIQUE INDEX idx (b),
-		UNIQUE INDEX idx_temp (b)
-);`,
-			srcIndex: "idx_temp",
-			dstIndex: "idx",
-			// Populate dstIndex with some 1000/1, 2000/2 entries. Populate srcIndex
-			// with 3000/3, 4000/4 entries, and a delete for the 2000/2 entry.
-			dstDataSQL: `INSERT INTO d.t (k, a, b) VALUES (1, 100, 1000), (2, 200, 2000)`,
-			srcDataSQL: `INSERT INTO d.t (k, a, b) VALUES (3, 300, 3000), (4, 400, 4000);
-   								 DELETE FROM d.t WHERE k = 2`,
-			// Insert another row for the 2000/2 entry just so that there's a primary
-			// index row for the index to return when we read it.
-			dstDataSQL2: `INSERT INTO d.t (k, a, b) VALUES (2, 201, 2000)`,
-			dstContentsBeforeMerge: [][]string{
-				{"1", "1000"},
-				{"2", "2000"},
-			},
-			// After merge dstIndex has 1000/1, 3000/3, 4000/4 entries. Its 2000/2 entry was
-			// deleted by the srcIndex delete.
-			dstContentsAfterMerge: [][]string{
-				{"1", "1000"},
-				{"3", "3000"},
-				{"4", "4000"},
-			},
-		},
-		{
-			name: "unique index noop delete",
-			setupSQL: `
-				CREATE DATABASE d;
-				CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-					UNIQUE INDEX idx (b),
-					UNIQUE INDEX idx_temp (b)
-  			);`,
-			srcIndex: "idx_temp",
-			dstIndex: "idx",
-			// Populate dstIndex with some 1000/1, 2000/2 entries. Populate srcIndex
-			// with 3000/3, 4000/4 entries, and a delete for a nonexistent key.
-			dstDataSQL: `INSERT INTO d.t (k, a, b) VALUES (1, 100, 1000), (2, 200, 2000)`,
-			srcDataSQL: `INSERT INTO d.t (k, a, b) VALUES (3, 300, 3000), (4, 400, 4000);
-   								 DELETE FROM d.t WHERE k = 5`,
-			dstContentsBeforeMerge: [][]string{
-				{"1", "1000"},
-				{"2", "2000"},
-			},
-			// After merge dstIndex has entries from both indexes.
-			dstContentsAfterMerge: [][]string{
-				{"1", "1000"},
-				{"2", "2000"},
-				{"3", "3000"},
-				{"4", "4000"},
-			},
-		},
-		{
-			name: "index with overriding values",
-			setupSQL: `
-				CREATE DATABASE d;
-   			CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
-					UNIQUE INDEX idx (b),
-					UNIQUE INDEX idx_temp (b)
-				);`,
-			srcIndex:   "idx_temp",
-			dstIndex:   "idx",
-			dstDataSQL: `INSERT INTO d.t (k, a, b) VALUES (1, 100, 1000), (2, 200, 2000)`,
-			srcDataSQL: `INSERT INTO d.t (k, a, b) VALUES (3, 300, 1000), (4, 400, 2000)`,
-			dstContentsBeforeMerge: [][]string{
-				{"1", "1000"},
-				{"2", "2000"},
-			},
-			// After merge dstIndex should have same entries as srcIndex.
-			dstContentsAfterMerge: [][]string{
-				{"3", "1000"},
-				{"4", "2000"},
-			},
-		},
-	}
-
-	run := func(t *testing.T, test TestCase) {
-		server, tdb, kvDB := serverutils.StartServer(t, params)
-		defer server.Stopper().Stop(context.Background())
-
-		// Run the initial setupSQL.
-		if _, err := tdb.Exec(test.setupSQL); err != nil {
-			t.Fatal(err)
-		}
-
-		codec := keys.SystemSQLCodec
-		tableDesc := desctestutils.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
-		settings := server.ClusterSettings()
-		execCfg := server.ExecutorConfig().(sql.ExecutorConfig)
-		evalCtx := tree.EvalContext{Settings: settings}
-		//mm := mon.NewMonitor("MemoryMonitor", mon.MemoryResource, nil, nil, 0, math.MaxInt64, settings)
-		mm := mon.NewUnlimitedMonitor(ctx, "MemoryMonitor", mon.MemoryResource, nil, nil, math.MaxInt64, settings)
-		flowCtx := execinfra.FlowCtx{Cfg: &execinfra.ServerConfig{DB: kvDB,
-			Settings:          settings,
-			Codec:             codec,
-			BackfillerMonitor: mm,
-		},
-			EvalCtx: &evalCtx}
-
-		im, err := backfill.NewIndexBackfillMerger(ctx, &flowCtx, execinfrapb.IndexBackfillMergerSpec{}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Here want to have different entries for the two indices, so we manipulate
-		// the index to DELETE_ONLY when we don't want to write to it, and
-		// DELETE_AND_WRITE_ONLY when we write to it.
-		setUseDeletePreservingEncoding := func(b bool) func(*descpb.IndexDescriptor) error {
-			return func(idx *descpb.IndexDescriptor) error {
-				idx.UseDeletePreservingEncoding = b
-				return nil
-			}
-		}
-
-		err = mutateIndexByName(kvDB, codec, tableDesc, test.dstIndex, nil, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY)
-		require.NoError(t, err)
-		err = mutateIndexByName(kvDB, codec, tableDesc, test.srcIndex, setUseDeletePreservingEncoding(true), descpb.DescriptorMutation_DELETE_ONLY)
-		require.NoError(t, err)
-
-		if _, err := tdb.Exec(test.dstDataSQL); err != nil {
-			t.Fatal(err)
-		}
-
-		err = mutateIndexByName(kvDB, codec, tableDesc, test.dstIndex, nil, descpb.DescriptorMutation_DELETE_ONLY)
-		require.NoError(t, err)
-		err = mutateIndexByName(kvDB, codec, tableDesc, test.srcIndex, nil, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY)
-		require.NoError(t, err)
-
-		if _, err := tdb.Exec(test.srcDataSQL); err != nil {
-			t.Fatal(err)
-		}
-
-		err = mutateIndexByName(kvDB, codec, tableDesc, test.dstIndex, nil, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY)
-		require.NoError(t, err)
-		err = mutateIndexByName(kvDB, codec, tableDesc, test.srcIndex, nil, descpb.DescriptorMutation_DELETE_ONLY)
-		require.NoError(t, err)
-
-		if _, err := tdb.Exec(test.dstDataSQL2); err != nil {
-			t.Fatal(err)
-		}
-
-		tableDesc = desctestutils.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
-
-		dstIndex, err := tableDesc.FindIndexWithName(test.dstIndex)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		srcIndex, err := tableDesc.FindIndexWithName(test.srcIndex)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
-			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection) error {
-			mut, err := descriptors.GetMutableTableByID(ctx, txn, tableDesc.GetID(), tree.ObjectLookupFlags{})
-			if err != nil {
-				return err
-			}
-
-			require.Equal(t, test.dstContentsBeforeMerge,
-				datumSliceToStrMatrix(fetchIndex(ctx, t, txn, mut, test.dstIndex)))
-
-			return nil
-		}))
-
-		sp := tableDesc.IndexSpan(codec, srcIndex.GetID())
-		_, err = im.Merge(context.Background(), codec, tableDesc, srcIndex.GetID(), dstIndex.GetID(), sp.Key, sp.EndKey, kvDB.Clock().Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
-			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection) error {
-			mut, err := descriptors.GetMutableTableByID(ctx, txn, tableDesc.GetID(), tree.ObjectLookupFlags{})
-			if err != nil {
-				return err
-			}
-
-			require.Equal(t, test.dstContentsAfterMerge,
-				datumSliceToStrMatrix(fetchIndex(ctx, t, txn, mut, test.dstIndex)))
-			return nil
-		}))
-	}
-
-	for _, test := range testCases {
-		t.Run(test.name, func(t *testing.T) {
-			run(t, test)
-		})
-	}
-}
+//// This test tests that the schema changer is able to merge entries from a
+//// delete-preserving index into a regular index.
+//func TestMergeProcessor(t *testing.T) {
+//	defer leaktest.AfterTest(t)()
+//	defer log.Scope(t).Close(t)
+//	ctx := context.Background()
+//
+//	defer lease.TestingDisableTableLeases()()
+//
+//	params, _ := tests.CreateTestServerParams()
+//
+//	type TestCase struct {
+//		name                   string
+//		setupSQL               string
+//		srcIndex               string
+//		dstIndex               string
+//		dstDataSQL             string
+//		srcDataSQL             string
+//		dstDataSQL2            string
+//		dstContentsBeforeMerge [][]string
+//		dstContentsAfterMerge  [][]string
+//	}
+//
+//	testCases := []TestCase{
+//		{
+//			name: "unique index",
+//			setupSQL: `CREATE DATABASE d;
+//   CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
+//		UNIQUE INDEX idx (b),
+//		UNIQUE INDEX idx_temp (b)
+//);`,
+//			srcIndex: "idx_temp",
+//			dstIndex: "idx",
+//			// Populate dstIndex with some 1000/1, 2000/2 entries. Populate srcIndex
+//			// with 3000/3, 4000/4 entries, and a delete for the 2000/2 entry.
+//			dstDataSQL: `INSERT INTO d.t (k, a, b) VALUES (1, 100, 1000), (2, 200, 2000)`,
+//			srcDataSQL: `INSERT INTO d.t (k, a, b) VALUES (3, 300, 3000), (4, 400, 4000);
+//   								 DELETE FROM d.t WHERE k = 2`,
+//			// Insert another row for the 2000/2 entry just so that there's a primary
+//			// index row for the index to return when we read it.
+//			dstDataSQL2: `INSERT INTO d.t (k, a, b) VALUES (2, 201, 2000)`,
+//			dstContentsBeforeMerge: [][]string{
+//				{"1", "1000"},
+//				{"2", "2000"},
+//			},
+//			// After merge dstIndex has 1000/1, 3000/3, 4000/4 entries. Its 2000/2 entry was
+//			// deleted by the srcIndex delete.
+//			dstContentsAfterMerge: [][]string{
+//				{"1", "1000"},
+//				{"3", "3000"},
+//				{"4", "4000"},
+//			},
+//		},
+//		{
+//			name: "unique index noop delete",
+//			setupSQL: `
+//				CREATE DATABASE d;
+//				CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
+//					UNIQUE INDEX idx (b),
+//					UNIQUE INDEX idx_temp (b)
+//  			);`,
+//			srcIndex: "idx_temp",
+//			dstIndex: "idx",
+//			// Populate dstIndex with some 1000/1, 2000/2 entries. Populate srcIndex
+//			// with 3000/3, 4000/4 entries, and a delete for a nonexistent key.
+//			dstDataSQL: `INSERT INTO d.t (k, a, b) VALUES (1, 100, 1000), (2, 200, 2000)`,
+//			srcDataSQL: `INSERT INTO d.t (k, a, b) VALUES (3, 300, 3000), (4, 400, 4000);
+//   								 DELETE FROM d.t WHERE k = 5`,
+//			dstContentsBeforeMerge: [][]string{
+//				{"1", "1000"},
+//				{"2", "2000"},
+//			},
+//			// After merge dstIndex has entries from both indexes.
+//			dstContentsAfterMerge: [][]string{
+//				{"1", "1000"},
+//				{"2", "2000"},
+//				{"3", "3000"},
+//				{"4", "4000"},
+//			},
+//		},
+//		{
+//			name: "index with overriding values",
+//			setupSQL: `
+//				CREATE DATABASE d;
+//   			CREATE TABLE d.t (k INT PRIMARY KEY, a INT, b INT,
+//					UNIQUE INDEX idx (b),
+//					UNIQUE INDEX idx_temp (b)
+//				);`,
+//			srcIndex:   "idx_temp",
+//			dstIndex:   "idx",
+//			dstDataSQL: `INSERT INTO d.t (k, a, b) VALUES (1, 100, 1000), (2, 200, 2000)`,
+//			srcDataSQL: `INSERT INTO d.t (k, a, b) VALUES (3, 300, 1000), (4, 400, 2000)`,
+//			dstContentsBeforeMerge: [][]string{
+//				{"1", "1000"},
+//				{"2", "2000"},
+//			},
+//			// After merge dstIndex should have same entries as srcIndex.
+//			dstContentsAfterMerge: [][]string{
+//				{"3", "1000"},
+//				{"4", "2000"},
+//			},
+//		},
+//	}
+//
+//	run := func(t *testing.T, test TestCase) {
+//		server, tdb, kvDB := serverutils.StartServer(t, params)
+//		defer server.Stopper().Stop(context.Background())
+//
+//		// Run the initial setupSQL.
+//		if _, err := tdb.Exec(test.setupSQL); err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		codec := keys.SystemSQLCodec
+//		tableDesc := desctestutils.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
+//		settings := server.ClusterSettings()
+//		execCfg := server.ExecutorConfig().(sql.ExecutorConfig)
+//		evalCtx := tree.EvalContext{Settings: settings}
+//		//mm := mon.NewMonitor("MemoryMonitor", mon.MemoryResource, nil, nil, 0, math.MaxInt64, settings)
+//		mm := mon.NewUnlimitedMonitor(ctx, "MemoryMonitor", mon.MemoryResource, nil, nil, math.MaxInt64, settings)
+//		flowCtx := execinfra.FlowCtx{Cfg: &execinfra.ServerConfig{DB: kvDB,
+//			Settings:          settings,
+//			Codec:             codec,
+//			BackfillerMonitor: mm,
+//		},
+//			EvalCtx: &evalCtx}
+//
+//		im, err := backfill.NewIndexBackfillMerger(ctx, &flowCtx, execinfrapb.IndexBackfillMergerSpec{}, nil)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		// Here want to have different entries for the two indices, so we manipulate
+//		// the index to DELETE_ONLY when we don't want to write to it, and
+//		// DELETE_AND_WRITE_ONLY when we write to it.
+//		setUseDeletePreservingEncoding := func(b bool) func(*descpb.IndexDescriptor) error {
+//			return func(idx *descpb.IndexDescriptor) error {
+//				idx.UseDeletePreservingEncoding = b
+//				return nil
+//			}
+//		}
+//
+//		err = mutateIndexByName(kvDB, codec, tableDesc, test.dstIndex, nil, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY)
+//		require.NoError(t, err)
+//		err = mutateIndexByName(kvDB, codec, tableDesc, test.srcIndex, setUseDeletePreservingEncoding(true), descpb.DescriptorMutation_DELETE_ONLY)
+//		require.NoError(t, err)
+//
+//		if _, err := tdb.Exec(test.dstDataSQL); err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		err = mutateIndexByName(kvDB, codec, tableDesc, test.dstIndex, nil, descpb.DescriptorMutation_DELETE_ONLY)
+//		require.NoError(t, err)
+//		err = mutateIndexByName(kvDB, codec, tableDesc, test.srcIndex, nil, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY)
+//		require.NoError(t, err)
+//
+//		if _, err := tdb.Exec(test.srcDataSQL); err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		err = mutateIndexByName(kvDB, codec, tableDesc, test.dstIndex, nil, descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY)
+//		require.NoError(t, err)
+//		err = mutateIndexByName(kvDB, codec, tableDesc, test.srcIndex, nil, descpb.DescriptorMutation_DELETE_ONLY)
+//		require.NoError(t, err)
+//
+//		if _, err := tdb.Exec(test.dstDataSQL2); err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		tableDesc = desctestutils.TestingGetMutableExistingTableDescriptor(kvDB, codec, "d", "t")
+//
+//		dstIndex, err := tableDesc.FindIndexWithName(test.dstIndex)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		srcIndex, err := tableDesc.FindIndexWithName(test.srcIndex)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
+//			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection) error {
+//			mut, err := descriptors.GetMutableTableByID(ctx, txn, tableDesc.GetID(), tree.ObjectLookupFlags{})
+//			if err != nil {
+//				return err
+//			}
+//
+//			require.Equal(t, test.dstContentsBeforeMerge,
+//				datumSliceToStrMatrix(fetchIndex(ctx, t, txn, mut, test.dstIndex)))
+//
+//			return nil
+//		}))
+//
+//		sp := tableDesc.IndexSpan(codec, srcIndex.GetID())
+//		_, err = im.Merge(context.Background(), codec, tableDesc, srcIndex.GetID(), dstIndex.GetID(), sp.Key, sp.EndKey, kvDB.Clock().Now())
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
+//			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection) error {
+//			mut, err := descriptors.GetMutableTableByID(ctx, txn, tableDesc.GetID(), tree.ObjectLookupFlags{})
+//			if err != nil {
+//				return err
+//			}
+//
+//			require.Equal(t, test.dstContentsAfterMerge,
+//				datumSliceToStrMatrix(fetchIndex(ctx, t, txn, mut, test.dstIndex)))
+//			return nil
+//		}))
+//	}
+//
+//	for _, test := range testCases {
+//		t.Run(test.name, func(t *testing.T) {
+//			run(t, test)
+//		})
+//	}
+//}
 
 // fetchIndex fetches the contents of an a table index returning the results
 // as datums. The datums will correspond to each of the columns stored in the
