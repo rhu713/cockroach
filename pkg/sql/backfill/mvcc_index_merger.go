@@ -12,7 +12,7 @@ package backfill
 
 import (
 	"context"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"fmt"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -57,6 +58,14 @@ var indexBackfillMergeBatchBytes = settings.RegisterIntSetting(
 	settings.NonNegativeInt,
 )
 
+var indexBackfillMergeNumWorkers = settings.RegisterIntSetting(
+	settings.TenantWritable,
+	"bulkio.index_backfill.merge_num_workers",
+	"the number of workers on a single merge processor",
+	5,
+	settings.PositiveInt,
+)
+
 // IndexBackfillMerger is a processor that merges entries from the corresponding
 // temporary index to a new index.
 type IndexBackfillMerger struct {
@@ -72,8 +81,8 @@ type IndexBackfillMerger struct {
 
 	output execinfra.RowReceiver
 
-	mon          *mon.BytesMonitor
-	boundAccount mon.BoundAccount
+	mon            *mon.BytesMonitor
+	muBoundAccount muBoundAccount
 }
 
 // OutputTypes is always nil.
@@ -91,9 +100,12 @@ const indexBackfillMergeProgressReportInterval = 10 * time.Second
 // Run runs the processor.
 func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 	log.Info(ctx, "Run called")
+	log.Info(ctx, "Run called")
 	opName := "IndexBackfillMerger"
 	ctx = logtags.AddTag(ctx, opName, int(ibm.spec.Table.ID))
 	ctx, span := execinfra.ProcessorSpan(ctx, opName)
+	fmt.Println(ibm)
+	fmt.Println(ibm.output)
 	defer span.Finish()
 	defer ibm.output.ProducerDone()
 	defer execinfra.SendTraceData(ctx, ibm.output)
@@ -158,24 +170,32 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 
 			key := sp.Key
 			for key != nil {
-				nextKey, err := ibm.Scan(ctx, idx, ibm.spec.AddedIndexes[idx], key, sp.EndKey, readAsOf, mergeCh)
+				fmt.Printf("@@@ merging %v -> %v\n", key, sp.EndKey)
+				chunk, nextKey, err := ibm.Scan(ctx, idx, ibm.spec.AddedIndexes[idx], key, sp.EndKey, readAsOf)
 				if err != nil {
 					return err
 				}
+				mergeCh <- chunk
 				key = nextKey
+
+				if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
+					if knobs != nil && knobs.SerializeMerge != nil {
+						<-knobs.SerializeMerge
+					}
+				}
 			}
 		}
 		return nil
 	})
 
-	numWorkers := 5
+	numWorkers := indexBackfillMergeNumWorkers.Get(&ibm.evalCtx.Settings.SV)
 
 	g.GoCtx(func(ctx context.Context) error {
 		defer close(stopProgress)
 		// TODO(rui): some room for improvement on single threaded
 		// implementation, e.g. run merge for spec spans in parallel.
 
-		for worker := 0; worker < numWorkers; worker++ {
+		for worker := int64(0); worker < numWorkers; worker++ {
 			g.GoCtx(func(ctx context.Context) error {
 				for mergeChunk := range mergeCh {
 					err := ibm.Merge(ctx, ibm.evalCtx.Codec, ibm.desc, ibm.spec.TemporaryIndexes[mergeChunk.spanIdx],
@@ -192,11 +212,16 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 					mu.Unlock()
 
 					if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
-						if knobs != nil && knobs.PushesProgressEveryChunk {
-							pushProgress()
+						if knobs != nil {
+							if knobs.PushesProgressEveryChunk {
+								pushProgress()
+							}
+
+							if knobs.SerializeMerge != nil {
+								knobs.SerializeMerge <- struct{}{}
+							}
 						}
 					}
-
 				}
 				return nil
 			})
@@ -230,6 +255,7 @@ type MergeChunk struct {
 	completedSpan roachpb.Span
 	keys          []roachpb.Key
 	spanIdx       int32
+	memUsed       int64
 }
 
 func (ibm *IndexBackfillMerger) Scan(
@@ -239,12 +265,11 @@ func (ibm *IndexBackfillMerger) Scan(
 	startKey roachpb.Key,
 	endKey roachpb.Key,
 	readAsOf hlc.Timestamp,
-	mergeCh chan MergeChunk,
-) (roachpb.Key, error) {
+) (MergeChunk, roachpb.Key, error) {
 	if knobs, ok := ibm.flowCtx.Cfg.TestingKnobs.IndexBackfillMergerTestingKnobs.(*IndexBackfillMergerTestingKnobs); ok {
 		if knobs != nil && knobs.RunBeforeMergeChunk != nil {
 			if err := knobs.RunBeforeMergeChunk(startKey); err != nil {
-				return nil, err
+				return MergeChunk{}, nil, err
 			}
 		}
 	}
@@ -261,10 +286,10 @@ func (ibm *IndexBackfillMerger) Scan(
 		log.Infof(ctx, "merging batch [%s, %s) into index %d", startKey, endKey, destinationID)
 		var ba roachpb.BatchRequest
 		ba.TargetBytes = chunkBytes
-		//if err := ibm.boundAccount.Grow(ctx, chunkBytes); err != nil {
-		//	return errors.Errorf("failed to fetch keys to merge from temp index")
-		//}
-		//defer ibm.boundAccount.Shrink(ctx, chunkBytes)
+		if err := ibm.growBoundAccount(ctx, chunkBytes); err != nil {
+			return errors.Errorf("failed to fetch keys to merge from temp index")
+		}
+		defer ibm.shrinkBoundAccount(ctx, chunkBytes)
 
 		ba.MaxSpanRequestKeys = chunkSize
 		ba.Add(&roachpb.ScanRequest{
@@ -281,25 +306,33 @@ func (ibm *IndexBackfillMerger) Scan(
 		}
 		return nil
 	}); err != nil {
-		return nil, err
+		return MergeChunk{}, nil, err
 	}
 
 	resp := br.Responses[0].GetScan()
 	chunk := MergeChunk{
 		spanIdx: spanIdx,
 	}
+	var chunkMem int64
 	if len(resp.Rows) == 0 {
 		chunk.completedSpan = roachpb.Span{Key: startKey, EndKey: endKey}
 	} else {
 		nextStart = resp.Rows[len(resp.Rows)-1].Key.Next()
 		chunk.completedSpan = roachpb.Span{Key: startKey, EndKey: nextStart}
 
+		ibm.muBoundAccount.Lock()
 		for i := range resp.Rows {
 			chunk.keys = append(chunk.keys, resp.Rows[i].Key)
+			if err := ibm.muBoundAccount.boundAccount.Grow(ctx, int64(len(resp.Rows[i].Key))); err != nil {
+				ibm.muBoundAccount.Unlock()
+				return MergeChunk{}, nil, errors.Errorf("failed to allocate space for merge keys")
+			}
+			chunkMem += int64(len(resp.Rows[i].Key))
 		}
+		ibm.muBoundAccount.Unlock()
 	}
-	mergeCh <- chunk
-	return nextStart, nil
+	chunk.memUsed = chunkMem
+	return chunk, nextStart, nil
 }
 
 // Merge merges the entries from startKey to endKey from the index with sourceID
@@ -341,11 +374,22 @@ func (ibm *IndexBackfillMerger) Merge(
 			return err
 		}
 
-		wb := txn.NewBatch()
 		var memUsedInMerge int64
+		ibm.muBoundAccount.Lock()
+		for i := range rb.Results {
+			rowMem := int64(len(rb.Results[i].Rows[0].Key)) + int64(len(rb.Results[i].Rows[0].Value.RawBytes))
+			if err := ibm.muBoundAccount.boundAccount.Grow(ctx, rowMem); err != nil {
+				ibm.muBoundAccount.Unlock()
+				return errors.Errorf("failed to allocate space to read latest keys from temp index")
+			}
+			memUsedInMerge += rowMem
+		}
+
+		wb := txn.NewBatch()
 		for i := range rb.Results {
 			sourceKV := &rb.Results[i].Rows[0]
 			if len(sourceKV.Key) < prefixLen {
+				ibm.muBoundAccount.Unlock()
 				return errors.Errorf("key for index entry %v does not start with prefix %v", sourceKV, sourcePrefix)
 			}
 
@@ -355,25 +399,29 @@ func (ibm *IndexBackfillMerger) Merge(
 
 			mergedEntry, deleted, err := mergeEntry(sourceKV, destKey)
 			if err != nil {
+				ibm.muBoundAccount.Unlock()
 				return err
 			}
 
 			if deleted {
 				deletedCount++
 				wb.Del(mergedEntry.Key)
-				//if err := ibm.boundAccount.Grow(ctx, int64(len(mergedEntry.Key))); err != nil {
-				//	return errors.Errorf("failed to allocate space to merge delete from temp index")
-				//}
+				if err := ibm.muBoundAccount.boundAccount.Grow(ctx, int64(len(mergedEntry.Key))); err != nil {
+					ibm.muBoundAccount.Unlock()
+					return errors.Errorf("failed to allocate space to merge delete from temp index")
+				}
 				memUsedInMerge += int64(len(mergedEntry.Key))
 			} else {
 				wb.Put(mergedEntry.Key, mergedEntry.Value)
-				//if err := ibm.boundAccount.Grow(ctx, int64(len(mergedEntry.Key)+len(mergedEntry.Value.RawBytes))); err != nil {
-				//	return errors.Errorf("failed to allocate space to merge put from temp index")
-				//}
+				if err := ibm.muBoundAccount.boundAccount.Grow(ctx, int64(len(mergedEntry.Key)+len(mergedEntry.Value.RawBytes))); err != nil {
+					ibm.muBoundAccount.Unlock()
+					return errors.Errorf("failed to allocate space to merge put from temp index")
+				}
 				memUsedInMerge += int64(len(mergedEntry.Key) + len(mergedEntry.Value.RawBytes))
 			}
 		}
-		//defer ibm.boundAccount.Shrink(ctx, memUsedInMerge)
+		ibm.muBoundAccount.Unlock()
+		defer ibm.shrinkBoundAccount(ctx, memUsedInMerge)
 		if err := txn.Run(ctx, wb); err != nil {
 			return err
 		}
@@ -415,6 +463,18 @@ func mergeEntry(sourceKV *kv.KeyValue, destKey roachpb.Key) (*kv.KeyValue, bool,
 	}, deleted, nil
 }
 
+func (ibm *IndexBackfillMerger) growBoundAccount(ctx context.Context, growBy int64) error {
+	defer ibm.muBoundAccount.Unlock()
+	ibm.muBoundAccount.Lock()
+	return ibm.muBoundAccount.boundAccount.Grow(ctx, growBy)
+}
+
+func (ibm *IndexBackfillMerger) shrinkBoundAccount(ctx context.Context, shrinkBy int64) {
+	defer ibm.muBoundAccount.Unlock()
+	ibm.muBoundAccount.Lock()
+	ibm.muBoundAccount.boundAccount.Shrink(ctx, shrinkBy)
+}
+
 // NewIndexBackfillMerger creates a new IndexBackfillMerger.
 func NewIndexBackfillMerger(
 	ctx context.Context,
@@ -434,7 +494,7 @@ func NewIndexBackfillMerger(
 		mon:     mergerMon,
 	}
 
-	ibm.boundAccount = mergerMon.MakeBoundAccount()
+	ibm.muBoundAccount.boundAccount = mergerMon.MakeBoundAccount()
 	return ibm, nil
 }
 
@@ -450,6 +510,8 @@ type IndexBackfillMergerTestingKnobs struct {
 	// PushesProgressEveryChunk forces the process to push the merge process after
 	// every chunk.
 	PushesProgressEveryChunk bool
+
+	SerializeMerge chan struct{}
 }
 
 var _ base.ModuleTestingKnobs = &IndexBackfillMergerTestingKnobs{}
