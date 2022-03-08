@@ -12,6 +12,7 @@ package sql
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -52,6 +53,7 @@ func (im *IndexBackfillerMergePlanner) plan(
 	todoSpanList [][]roachpb.Span,
 	addedIndexes, temporaryIndexes []descpb.IndexID,
 	metaFn func(_ context.Context, meta *execinfrapb.ProducerMetadata) error,
+	mergeTimestamp hlc.Timestamp,
 ) (func(context.Context) error, error) {
 	var p *PhysicalPlan
 	var evalCtx extendedEvalContext
@@ -64,7 +66,7 @@ func (im *IndexBackfillerMergePlanner) plan(
 		planCtx = im.execCfg.DistSQLPlanner.NewPlanningCtx(ctx, &evalCtx, nil /* planner */, txn,
 			DistributionTypeSystemTenantOnly)
 
-		spec, err := initIndexBackfillMergerSpec(*tableDesc.TableDesc(), addedIndexes, temporaryIndexes)
+		spec, err := initIndexBackfillMergerSpec(*tableDesc.TableDesc(), addedIndexes, temporaryIndexes, mergeTimestamp)
 		if err != nil {
 			return err
 		}

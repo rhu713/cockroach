@@ -2654,6 +2654,21 @@ func (sc *SchemaChanger) distIndexMerge(
 	addedIndexes []descpb.IndexID,
 	temporaryIndexes []descpb.IndexID,
 ) error {
+	mergeTimestamp := sc.job.Details().(jobspb.SchemaChangeDetails).MergeTimestamp
+	if mergeTimestamp.IsEmpty() {
+		mergeTimestamp = sc.clock.Now()
+		log.Infof(ctx, "persisting merge time %v...", mergeTimestamp)
+		if err := sc.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			details := sc.job.Details().(jobspb.SchemaChangeDetails)
+			details.MergeTimestamp = mergeTimestamp
+			return sc.job.SetDetails(ctx, txn, details)
+		}); err != nil {
+			return err
+		}
+	} else {
+		log.Infof(ctx, "merging all keys in temporary index before time %v...", mergeTimestamp)
+	}
+
 	// Gather the initial resume spans for the merge process.
 	progress, err := extractMergeProgress(sc.job, tableDesc, addedIndexes, temporaryIndexes)
 	if err != nil {
@@ -2696,7 +2711,7 @@ func (sc *SchemaChanger) distIndexMerge(
 
 	log.Infof(ctx, "indexbackfill merge: before plan")
 	run, err := planner.plan(ctx, tableDesc, progress.TodoSpans, progress.AddedIndexes,
-		progress.TemporaryIndexes, metaFn)
+		progress.TemporaryIndexes, metaFn, mergeTimestamp)
 	if err != nil {
 		return err
 	}

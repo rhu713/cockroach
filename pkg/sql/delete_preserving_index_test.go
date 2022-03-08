@@ -698,6 +698,7 @@ func TestMergeProcessor(t *testing.T) {
 			AddedIndexes:     []descpb.IndexID{dstIndex.GetID()},
 			Spans:            []roachpb.Span{sp},
 			SpanIdx:          []int32{0},
+			MergeTimestamp:   kvDB.Clock().Now(),
 		}, fakeReceiver{})
 		if err != nil {
 			t.Fatal(err)

@@ -111,7 +111,7 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 	defer execinfra.SendTraceData(ctx, ibm.output)
 
 	// TODO: move this into spec
-	readAsOf := ibm.flowCtx.Cfg.DB.Clock().Now()
+	mergeTimestamp := ibm.spec.MergeTimestamp
 
 	mu := struct {
 		syncutil.Mutex
@@ -171,7 +171,7 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 			key := sp.Key
 			for key != nil {
 				fmt.Printf("@@@ merging %v -> %v\n", key, sp.EndKey)
-				chunk, nextKey, err := ibm.Scan(ctx, idx, ibm.spec.AddedIndexes[idx], key, sp.EndKey, readAsOf)
+				chunk, nextKey, err := ibm.Scan(ctx, idx, ibm.spec.AddedIndexes[idx], key, sp.EndKey, mergeTimestamp)
 				if err != nil {
 					return err
 				}
