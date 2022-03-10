@@ -60,7 +60,7 @@ var indexBackfillMergeBatchBytes = settings.RegisterIntSetting(
 var indexBackfillMergeNumWorkers = settings.RegisterIntSetting(
 	settings.TenantWritable,
 	"bulkio.index_backfill.merge_num_workers",
-	"the number of parallel merges on a single merge processor",
+	"the number of parallel merges per node in the cluster",
 	4,
 	settings.PositiveInt,
 )
@@ -150,7 +150,7 @@ func (ibm *IndexBackfillMerger) Run(ctx context.Context) {
 	})
 
 	numWorkers := indexBackfillMergeNumWorkers.Get(&ibm.evalCtx.Settings.SV)
-	mergeCh := make(chan mergeChunk, numWorkers)
+	mergeCh := make(chan mergeChunk)
 	mergeTimestamp := ibm.spec.MergeTimestamp
 
 	g.GoCtx(func(ctx context.Context) error {

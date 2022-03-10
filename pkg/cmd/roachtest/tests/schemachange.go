@@ -294,7 +294,7 @@ func findIndexProblem(
 }
 
 func registerSchemaChangeIndexTPCC1000(r registry.Registry) {
-	r.Add(makeIndexAddTpccTest(r.MakeClusterSpec(5, spec.CPU(16)), 1000, time.Hour*2))
+	r.Add(makeIndexAddTpccTest(r.MakeClusterSpec(5, spec.CPU(16)), 1000, time.Minute*45))
 }
 
 func registerSchemaChangeIndexTPCC100(r registry.Registry) {
