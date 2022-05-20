@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"net/url"
 	"strings"
 
@@ -341,6 +342,7 @@ func findLatestFile(
 	// We name files such that the most recent latest file will always
 	// be at the top, so just grab the first filename.
 	err := exportStore.List(ctx, latestHistoryDirectory, "", func(p string) error {
+		log.Infof(ctx, "backup_debug: listing returned %s", p)
 		p = strings.TrimPrefix(p, "/")
 		latestFile = p
 		latestFileFound = true

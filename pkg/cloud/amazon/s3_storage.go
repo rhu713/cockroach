@@ -505,6 +505,7 @@ func (s *s3Storage) openStreamAt(
 // ReadFile is shorthand for ReadFileAt with offset 0.
 func (s *s3Storage) ReadFile(ctx context.Context, basename string) (ioctx.ReadCloserCtx, error) {
 	reader, _, err := s.ReadFileAt(ctx, basename, 0)
+	log.Infof(ctx, "backup_debug: attempting to read s3 file=%s with bucket=%s prefix=%s err=%v", basename, *s.bucket, s.prefix, err)
 	return reader, err
 }
 
