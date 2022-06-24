@@ -12,6 +12,8 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/errors"
@@ -32,8 +34,9 @@ type sstIterator struct {
 	keyBuf []byte
 
 	// roachpb.Verify k/v pairs on each call to Next.
-	verify   bool
-	filename string
+	verify     bool
+	filename   string
+	debugCount int
 }
 
 // NewSSTIterator returns a `SimpleMVCCIterator` for the provided file, which it
@@ -123,6 +126,14 @@ func (r *sstIterator) maybeWrapErr() {
 
 // Next implements the SimpleMVCCIterator interface.
 func (r *sstIterator) Next() {
+	if strings.Contains(r.filename, "773394689918304257") {
+		fmt.Println("count", r.debugCount)
+		r.debugCount++
+		if r.debugCount > 2 {
+			r.err = errors.New("custom err")
+		}
+	}
+
 	if !r.iterValid || r.err != nil {
 		r.maybeWrapErr()
 		return
