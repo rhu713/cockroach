@@ -189,6 +189,11 @@ func (r *Replica) protectedTimestampRecordCurrentlyApplies(
 		return false, false, "", roachpb.NewRangeKeyMismatchError(ctx, args.Key, args.EndKey, desc,
 			r.mu.state.Lease)
 	}
+
+	fmt.Printf("rh_debug: range %s - %s ts=%s GCThreshold: %s\n",
+		desc.StartKey.String(), desc.EndKey.String(),
+		args.Protected.String(), r.mu.state.GCThreshold.String())
+
 	if args.Protected.LessEq(*r.mu.state.GCThreshold) {
 		gcReason := fmt.Sprintf("protected ts: %s is less than equal to the GCThreshold: %s for the"+
 			" range %s - %s", args.Protected.String(), r.mu.state.GCThreshold.String(),
