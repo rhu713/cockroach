@@ -12,6 +12,7 @@ package bulk
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -65,6 +66,7 @@ func (b *TracingAggregator) Notify(event tracing.Structured) {
 		b.mu.sp.SetLazyTag(eventTag, b.mu.aggregatedEvents[eventTag])
 	}
 	b.mu.aggregatedEvents[eventTag].Combine(bulkEvent)
+	fmt.Println("@@@ agg event", b.mu.aggregatedEvents[eventTag])
 }
 
 // Close is responsible for finishing the Aggregators' tracing span.
@@ -97,5 +99,6 @@ func MakeTracingAggregatorWithSpan(
 	agg.mu.aggregatedEvents = make(map[string]TracingAggregatorEvent)
 	agg.mu.sp = aggSpan
 
+	fmt.Println("@@@ new agg for sp", aggSpan)
 	return aggCtx, agg
 }
