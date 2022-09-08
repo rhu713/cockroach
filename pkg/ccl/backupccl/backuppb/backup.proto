@@ -221,3 +221,36 @@ message SSTBatcherStats {
   // message.
   int64 duration = 5 [(gogoproto.casttype) = "time.Duration"];
 }
+
+message IngestionPerformanceStats {
+  int64 data_size = 1;
+
+  int64 buffer_flushes = 2;  // number of buffer flushes.
+  int64 flushes_due_to_size = 3; // number of buffer flushes due to buffer size.
+  int64 batches = 4; // number of batches (addsstable calls) sent.
+  int64 batches_due_to_range = 5; // number of batches due to range bounds.
+  int64 batches_due_to_size = 6;// number of batches due to batch size.
+  int64 split_retries = 7; // extra sub-batches created due to unexpected splits.
+
+  int64 splits = 8;
+  int64 scatters = 9; // number of splits/scatters sent.
+  int64 scatter_moved = 10;  // total size moved by scatter calls.
+
+  int64 fill_wait = 11 [(gogoproto.casttype) = "time.Duration"]; // time spent between buffer flushes.
+  int64 sort_wait = 12  [(gogoproto.casttype) = "time.Duration"]; // time spent sorting buffers.
+  int64 flush_wait = 13 [(gogoproto.casttype) = "time.Duration"]; // time spent flushing buffers.
+  int64 batch_wait = 14 [(gogoproto.casttype) = "time.Duration"]; // time spent flushing batches (inc split/scatter/send).
+  int64 send_wait = 15  [(gogoproto.casttype) = "time.Duration"]; // time spent sending batches (addsstable+retries)
+  int64 split_wait = 16 [(gogoproto.casttype) = "time.Duration"]; // time spent splitting.
+  int64 scatter_wait = 17  [(gogoproto.casttype) = "time.Duration"]; // time spent scattering.
+  int64 commit_wait = 18  [(gogoproto.casttype) = "time.Duration"]; // time spent waiting for commit timestamps.
+
+  int64 duration = 19  [(gogoproto.casttype) = "time.Duration"];
+
+  // Span tracks the total span into which this batcher has flushed. It is
+  // only maintained if log.V(1), so if vmodule is upped mid-ingest it may be
+  // incomplete.
+  roachpb.Span span = 20 [(gogoproto.nullable) = false];
+
+  map<int32, int64> send_wait_by_store = 21 [(gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID", (gogoproto.castvalue) = "time.Duration"];
+}

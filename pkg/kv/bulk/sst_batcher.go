@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"math"
-	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backuppb"
@@ -138,7 +137,10 @@ type SSTBatcher struct {
 	// The rest of the fields accumulated state as opposed to configuration. Some,
 	// like totalRows, are accumulated _across_ batches and are not reset between
 	// batches when Reset() is called.
-	stats         ingestionPerformanceStats
+	currentBatchStats backuppb.IngestionPerformanceStats
+
+	totalStats backuppb.IngestionPerformanceStats
+
 	disableSplits bool
 
 	// The rest of the fields are per-batch and are reset via Reset() before each
@@ -345,8 +347,11 @@ func (b *SSTBatcher) Reset(ctx context.Context) error {
 
 	b.rowCounter.BulkOpSummary.Reset()
 
-	if b.stats.sendWaitByStore == nil {
-		b.stats.sendWaitByStore = &sendWaitByStore{timings: make(map[roachpb.StoreID]time.Duration)}
+	if b.currentBatchStats.SendWaitByStore == nil {
+		b.currentBatchStats.SendWaitByStore = make(map[roachpb.StoreID]time.Duration)
+	}
+	if b.totalStats.SendWaitByStore == nil {
+		b.totalStats.SendWaitByStore = make(map[roachpb.StoreID]time.Duration)
 	}
 
 	return nil
@@ -433,7 +438,7 @@ func (b *SSTBatcher) Flush(ctx context.Context) error {
 			if err := b.db.Clock().SleepUntil(ctx, b.mu.maxWriteTS); err != nil {
 				return err
 			}
-			b.stats.commitWait += timeutil.Since(now.GoTime())
+			b.currentBatchStats.CommitWait += timeutil.Since(now.GoTime())
 		}
 		b.mu.maxWriteTS.Reset()
 	}
@@ -447,7 +452,7 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int) error {
 	}
 	beforeFlush := timeutil.Now()
 
-	b.stats.batches++
+	b.currentBatchStats.Batches++
 
 	if delay := ingestDelay.Get(&b.settings.SV); delay != 0 {
 		if delay > time.Second || log.V(1) {
@@ -473,10 +478,10 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int) error {
 
 	if reason == sizeFlush {
 		log.VEventf(ctx, 3, "%s flushing %s SST due to size > %s", b.name, size, sz(ingestFileSize(b.settings)))
-		b.stats.batchesDueToSize++
+		b.currentBatchStats.BatchesDueToSize++
 	} else if reason == rangeFlush {
 		log.VEventf(ctx, 3, "%s flushing %s SST due to range boundary", b.name, size)
-		b.stats.batchesDueToRange++
+		b.currentBatchStats.BatchesDueToRange++
 	}
 
 	// If this file is starting in the same span we last added to and is bigger
@@ -505,11 +510,11 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int) error {
 			} else {
 				beforeSplit := timeutil.Now()
 				err := b.db.AdminSplit(ctx, splitAbove, expire)
-				b.stats.splitWait += timeutil.Since(beforeSplit)
+				b.currentBatchStats.SplitWait += timeutil.Since(beforeSplit)
 				if err != nil {
 					log.Warningf(ctx, "%s failed to split-above: %v", b.name, err)
 				} else {
-					b.stats.splits++
+					b.currentBatchStats.Splits++
 				}
 			}
 		}
@@ -520,27 +525,27 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int) error {
 		} else {
 			beforeSplit := timeutil.Now()
 			err := b.db.AdminSplit(ctx, splitAt, expire)
-			b.stats.splitWait += timeutil.Since(beforeSplit)
+			b.currentBatchStats.SplitWait += timeutil.Since(beforeSplit)
 			if err != nil {
 				log.Warningf(ctx, "%s failed to split: %v", b.name, err)
 			} else {
-				b.stats.splits++
+				b.currentBatchStats.Splits++
 
 				// Now scatter the RHS before we proceed to ingest into it. We know it
 				// should be empty since we split above if there was a nextExistingKey.
 				beforeScatter := timeutil.Now()
 				resp, err := b.db.AdminScatter(ctx, splitAt, maxScatterSize)
-				b.stats.scatterWait += timeutil.Since(beforeScatter)
+				b.currentBatchStats.ScatterWait += timeutil.Since(beforeScatter)
 				if err != nil {
 					// err could be a max size violation, but this is unexpected since we
 					// split before, so a warning is probably ok.
 					log.Warningf(ctx, "%s failed to scatter	: %v", b.name, err)
 				} else {
-					b.stats.scatters++
-					moved := sz(resp.ReplicasScatteredBytes)
-					b.stats.scatterMoved += moved
+					b.currentBatchStats.Scatters++
+					moved := resp.ReplicasScatteredBytes
+					b.currentBatchStats.ScatterMoved += moved
 					if moved > 0 {
-						log.VEventf(ctx, 1, "%s split scattered %s in non-empty range %s", b.name, moved, resp.RangeInfos[0].Desc.KeySpan().AsRawSpanWithNoLocals())
+						log.VEventf(ctx, 1, "%s split scattered %s in non-empty range %s", b.name, sz(moved), resp.RangeInfos[0].Desc.KeySpan().AsRawSpanWithNoLocals())
 					}
 				}
 			}
@@ -589,24 +594,31 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int) error {
 		}
 	}
 
+	currentBatchStatsCopy := b.currentBatchStats.Identity().(*backuppb.IngestionPerformanceStats)
+	currentBatchStatsCopy.Combine(&b.currentBatchStats)
+	b.currentBatchStats.Reset()
+
 	fn := func(ctx context.Context) error {
 		defer res.Release()
 		defer b.mem.Shrink(ctx, reserved)
-		if err := b.addSSTable(ctx, batchTS, start, end, data, stats, !flushAsync); err != nil {
+		if err := b.addSSTable(ctx, batchTS, start, end, data, stats, !flushAsync, currentBatchStatsCopy); err != nil {
 			return err
 		}
 		b.mu.Lock()
 		summary.DataSize += int64(size)
+		currentBatchStatsCopy.DataSize += int64(size)
 		b.mu.totalRows.Add(summary)
 
 		afterFlush := timeutil.Now()
-		lastFlush := b.lastFlush
-		atomic.AddInt64(&b.stats.batchWaitAtomic, int64(afterFlush.Sub(beforeFlush)))
-		atomic.AddInt64(&b.stats.dataSizeAtomic, int64(size))
+		currentBatchStatsCopy.BatchWait += afterFlush.Sub(beforeFlush)
+		currentBatchStatsCopy.Duration = afterFlush.Sub(b.lastFlush)
+		b.totalStats.Combine(currentBatchStatsCopy)
 		b.lastFlush = afterFlush
 		b.mu.Unlock()
 
-		b.reportFlushStats(size, reason, lastFlush, afterFlush)
+		if b.tracingSpan != nil {
+			b.tracingSpan.RecordStructured(currentBatchStatsCopy)
+		}
 		return nil
 	}
 
@@ -658,8 +670,12 @@ func (b *SSTBatcher) addSSTable(
 	sstBytes []byte,
 	stats enginepb.MVCCStats,
 	updatesLastRange bool,
+	ingestionPerformanceStats *backuppb.IngestionPerformanceStats,
 ) error {
 	sendStart := timeutil.Now()
+	if ingestionPerformanceStats == nil {
+		panic("ingestionPerformanceStats should not be nil")
+	}
 
 	// Currently, the SSTBatcher cannot ingest range keys, so it is safe to
 	// ComputeStats with an iterator that only surfaces point keys.
@@ -735,18 +751,16 @@ func (b *SSTBatcher) addSSTable(
 				br, pErr := b.db.NonTransactionalSender().Send(ctx, ba)
 				sendTime := timeutil.Since(beforeSend)
 
-				atomic.AddInt64(&b.stats.sendWaitAtomic, int64(sendTime))
+				ingestionPerformanceStats.SendWait += sendTime
 				if br != nil && len(br.BatchResponse_Header.RangeInfos) > 0 {
 					// Should only ever really be one iteration but if somehow it isn't,
 					// e.g. if a request was redirected, go ahead and count it against all
 					// involved stores; if it is small this edge case is immaterial, and
 					// if it is large, it's probably one big one but we don't know which
 					// so just blame them all (averaging it out could hide one big delay).
-					b.stats.sendWaitByStore.Lock()
 					for i := range br.BatchResponse_Header.RangeInfos {
-						b.stats.sendWaitByStore.timings[br.BatchResponse_Header.RangeInfos[i].Lease.Replica.StoreID] += sendTime
+						ingestionPerformanceStats.SendWaitByStore[br.BatchResponse_Header.RangeInfos[i].Lease.Replica.StoreID] += sendTime
 					}
-					b.stats.sendWaitByStore.Unlock()
 				}
 
 				if pErr == nil {
@@ -825,7 +839,7 @@ func (b *SSTBatcher) addSSTable(
 		// top level SST which is kept around to iterate over.
 		item.sstBytes = nil
 	}
-	atomic.AddInt64(&b.stats.splitRetriesAtomic, int64(files-1))
+	ingestionPerformanceStats.SplitRetries += int64(files - 1)
 
 	log.VEventf(ctx, 3, "AddSSTable [%v, %v) added %d files and took %v", start, end, files, timeutil.Since(sendStart))
 	return nil
@@ -889,24 +903,4 @@ func createSplitSSTable(
 	}
 	right = &sstSpan{start: first, end: last.Next(), sstBytes: sstFile.Data()}
 	return left, right, nil
-}
-
-func (b *SSTBatcher) reportFlushStats(size sz, reason int, lastFlush, afterFlush time.Time) {
-	if b.tracingSpan == nil {
-		return
-	}
-
-	sstBatcherStats := backuppb.SSTBatcherStats{
-		DataSize: int64(size),
-		Duration: afterFlush.Sub(lastFlush),
-		Batches:  1,
-	}
-
-	if reason == rangeFlush {
-		sstBatcherStats.BatchesDueToRange = 1
-	} else if reason == sizeFlush {
-		sstBatcherStats.BatchesDueToSize = 1
-	}
-
-	b.tracingSpan.RecordStructured(&sstBatcherStats)
 }

@@ -104,8 +104,8 @@ var defaultNumWorkers = util.ConstantWithMetamorphicTestRange(
 		}
 		return min(4, restoreWorkerCores)
 	}(), /* defaultValue */
-	1, /* metamorphic min */
-	8, /* metamorphic max */
+	1,   /* metamorphic min */
+	8,   /* metamorphic max */
 )
 
 // TODO(pbardea): It may be worthwhile to combine this setting with the one that
@@ -357,12 +357,16 @@ func (rd *restoreDataProcessor) openSSTs(
 }
 
 func (rd *restoreDataProcessor) runRestoreWorkers(ctx context.Context, ssts chan mergedSST) error {
-	return ctxgroup.GroupWorkers(ctx, rd.numWorkers, func(ctx context.Context, _ int) error {
+	return ctxgroup.GroupWorkers(ctx, rd.numWorkers, func(ctx context.Context, worker int) error {
 		kr, err := MakeKeyRewriterFromRekeys(rd.FlowCtx.Codec(), rd.spec.TableRekeys, rd.spec.TenantRekeys,
 			false /* restoreTenantFromStream */)
 		if err != nil {
 			return err
 		}
+
+		ctx, agg := bulkutil.MakeTracingAggregatorWithSpan(ctx,
+			fmt.Sprintf("%s-worker-%d-aggregator", restoreDataProcName, worker), rd.EvalCtx.Tracer)
+		defer agg.Close()
 
 		for {
 			done, err := func() (done bool, _ error) {
@@ -406,9 +410,6 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	entry := sst.entry
 	iter := sst.iter
 	defer sst.cleanup()
-
-	ctx, agg := bulkutil.MakeTracingAggregatorWithSpan(ctx, "SSTBatcher-aggregator", evalCtx.Tracer)
-	defer agg.Close()
 
 	var batcher SSTBatcherExecutor
 	if rd.spec.ValidateOnly {

@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/redact"
 )
 
+// TODO: delete this file
 type ingestionPerformanceStats struct {
 	dataSizeAtomic int64
 
@@ -81,7 +82,7 @@ func (s ingestionPerformanceStats) LogTimings(ctx context.Context, name, action 
 }
 
 func (s ingestionPerformanceStats) LogFlushes(
-	ctx context.Context, name, action string, bufSize sz,
+	ctx context.Context, name, action string, bufSize int64,
 ) {
 	log.Infof(ctx,
 		"%s adder %s; flushed into %s %d times, %d due to buffer size (%s); flushing chunked into %d files (%d for ranges, %d for sst size) +%d split-retries",
@@ -90,7 +91,7 @@ func (s ingestionPerformanceStats) LogFlushes(
 		s.span,
 		s.bufferFlushes,
 		s.flushesDueToSize,
-		bufSize,
+		sz(bufSize),
 		s.batches,
 		s.batchesDueToRange,
 		s.batchesDueToSize,
@@ -125,6 +126,7 @@ func (s *sendWaitByStore) LogPerStoreTimings(ctx context.Context, name string) {
 	log.Infof(ctx, "%s waited on sending to: %s", name, redact.Safe(sb.String()))
 }
 
+// TODO: delete this
 type sz int64
 
 func (b sz) String() string { return string(humanizeutil.IBytes(int64(b))) }
