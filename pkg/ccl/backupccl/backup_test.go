@@ -249,16 +249,16 @@ func newDatadrivenTestState() datadrivenTestState {
 // different SQL commands. The test files are in testdata/backup-restore.
 // It has the following commands:
 //
-// - "new-server name=<name> [share-io-dir=<name>]": create a new server with
-//   the input name. It takes in an optional share-io-dir argument to share an
-//   IO directory with an existing server. This is useful when restoring from a
-//   backup taken in another server.
-// - "exec-sql server=<name>": executes the input SQL query on the target server.
-//   By default, server is the last created server.
-// - "query-sql server=<name>": executes the input SQL query on the target server
-//   and expects that the results are as desired. By default, server is the last
-//   created server.
-// - "reset": clear all state associated with the test.
+//   - "new-server name=<name> [share-io-dir=<name>]": create a new server with
+//     the input name. It takes in an optional share-io-dir argument to share an
+//     IO directory with an existing server. This is useful when restoring from a
+//     backup taken in another server.
+//   - "exec-sql server=<name>": executes the input SQL query on the target server.
+//     By default, server is the last created server.
+//   - "query-sql server=<name>": executes the input SQL query on the target server
+//     and expects that the results are as desired. By default, server is the last
+//     created server.
+//   - "reset": clear all state associated with the test.
 func TestBackupRestoreDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -9246,7 +9246,7 @@ func TestViewRevisions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	_, sqlDB, _, cleanup := backupRestoreTestSetup(t, singleNode, 10, InitManualReplication)
+	_, _, sqlDB, _, cleanup := BackupRestoreTestSetup(t, singleNode, 10, InitManualReplication)
 	defer cleanup()
 
 	sqlDB.Exec(t, `
@@ -9269,7 +9269,7 @@ func TestBackupDoNotIncludeViewSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	tc, sqlDB, dir, cleanupFn := backupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
+	_, tc, sqlDB, dir, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
 	defer cleanupFn()
 	kvDB := tc.Server(0).DB()
 
@@ -9278,22 +9278,22 @@ func TestBackupDoNotIncludeViewSpans(t *testing.T) {
 	sqlDB.Exec(t, "CREATE TABLE d.t (k INT, a INT, b INT)")
 	sqlDB.Exec(t, "INSERT INTO d.t VALUES(1, 100, 101), (2, 200, 202)")
 	sqlDB.Exec(t, "CREATE VIEW d.tview AS SELECT k, b FROM d.t")
-	sqlDB.Exec(t, `BACKUP DATABASE d INTO $1`, localFoo)
+	sqlDB.Exec(t, `BACKUP DATABASE d INTO $1`, LocalFoo)
 
-	res := sqlDB.QueryStr(t, `SHOW BACKUPS IN $1`, localFoo)
+	res := sqlDB.QueryStr(t, `SHOW BACKUPS IN $1`, LocalFoo)
 	if len(res) != 1 {
 		t.Fatal("expected 1 backup")
 	}
 
 	// Read the backup manifest.
-	var backupManifest backuppb.BackupManifest
+	var backupManifest BackupManifest
 	{
-		backupManifestBytes, err := ioutil.ReadFile(filepath.Join(dir, "foo", res[0][0], backupbase.BackupManifestName))
+		backupManifestBytes, err := ioutil.ReadFile(filepath.Join(dir, "foo", res[0][0], backupManifestName))
 		if err != nil {
 			t.Fatalf("%+v", err)
 		}
-		if backupinfo.IsGZipped(backupManifestBytes) {
-			backupManifestBytes, err = backupinfo.DecompressData(context.Background(), nil, backupManifestBytes)
+		if isGZipped(backupManifestBytes) {
+			backupManifestBytes, err = decompressData(backupManifestBytes)
 			require.NoError(t, err)
 		}
 		if err := protoutil.Unmarshal(backupManifestBytes, &backupManifest); err != nil {
@@ -9303,7 +9303,7 @@ func TestBackupDoNotIncludeViewSpans(t *testing.T) {
 
 	// Verify that the manifest doesn't contain any spans that intersect the span
 	// for the view.
-	tbDesc := desctestutils.TestingGetPublicTableDescriptor(kvDB, keys.SystemSQLCodec, "d", "tview")
+	tbDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "d", "tview")
 	viewSpan := tbDesc.TableSpan(keys.SystemSQLCodec)
 
 	for _, sp := range backupManifest.Spans {
@@ -9313,8 +9313,8 @@ func TestBackupDoNotIncludeViewSpans(t *testing.T) {
 	}
 
 	sqlDB.Exec(t, "DROP DATABASE d")
-	sqlDB.Exec(t, "RESTORE DATABASE d FROM LATEST IN $1", localFoo)
-	sqlDB.CheckQueryResults(t, "SHOW CREATE VIEW d.tview", [][]string{{"d.public.tview", "CREATE VIEW public.tview (\n\tk,\n\tb\n) AS SELECT k, b FROM d.public.t"}})
+	sqlDB.Exec(t, "RESTORE DATABASE d FROM LATEST IN $1", LocalFoo)
+	sqlDB.CheckQueryResults(t, "SHOW CREATE VIEW d.tview", [][]string{{"d.public.tview", "CREATE VIEW public.tview (k, b) AS SELECT k, b FROM d.public.t"}})
 	sqlDB.CheckQueryResults(t, "SELECT * from d.tview", [][]string{{"1", "101"}, {"2", "202"}})
 }
 
@@ -9332,9 +9332,28 @@ func TestBackupDBWithViewOnAdjacentDBRange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	tc, sqlDB, _, cleanupFn := backupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
+	_, tc, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
 	defer cleanupFn()
 	s0 := tc.Servers[0]
+
+	waitForTableSplit := func(conn *gosql.DB, tableName string, dbName string) {
+		testutils.SucceedsSoon(t, func() error {
+			count := 0
+			if err := conn.QueryRow(
+				"SELECT count(*) "+
+					"FROM crdb_internal.ranges_no_leases "+
+					"WHERE table_name = $1 "+
+					"AND database_name = $2",
+				tableName, dbName).Scan(&count); err != nil {
+				return err
+			}
+			if count == 0 {
+				return errors.New("waiting for table split")
+			}
+			return nil
+		})
+
+	}
 
 	// Speeds up the test.
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.rangefeed.enabled = true`)
@@ -9357,7 +9376,7 @@ func TestBackupDBWithViewOnAdjacentDBRange(t *testing.T) {
 	`)
 
 	// Wait for splits to be created on the new tables.
-	waitForTableSplit(t, tc.Conns[0], "t2", "da")
+	waitForTableSplit(tc.Conns[0], "t2", "da")
 
 	sqlDB.Exec(t, `BACKUP DATABASE db INTO 'userfile:///a' WITH revision_history;`)
 
