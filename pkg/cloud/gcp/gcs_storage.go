@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/types"
@@ -269,7 +270,34 @@ func (g *gcsStorage) Writer(ctx context.Context, basename string) (io.WriteClose
 		w.ChunkSize = 0
 	}
 	w.ChunkRetryDeadline = gcsChunkRetryTimeout.Get(&g.settings.SV)
-	return w, nil
+
+	return loggedWriterCloser{
+		basename:             basename,
+		internalWriterCloser: w,
+		ctx:                  ctx,
+	}, nil
+}
+
+type loggedWriterCloser struct {
+	basename             string
+	internalWriterCloser io.WriteCloser
+	ctx                  context.Context
+}
+
+func (l loggedWriterCloser) Write(p []byte) (n int, err error) {
+	n, err = l.internalWriterCloser.Write(p)
+	if err != nil {
+		log.Warningf(l.ctx, "rh_debug: error writing %d bytes to file %s: %v", len(p), l.basename, err)
+	}
+	return n, err
+}
+
+func (l loggedWriterCloser) Close() error {
+	err := l.internalWriterCloser.Close()
+	if err != nil {
+		log.Warningf(l.ctx, "rh_debug: error closing writer %s: %v", l.basename, err)
+	}
+	return err
 }
 
 // ReadFile is shorthand for ReadFileAt with offset 0.

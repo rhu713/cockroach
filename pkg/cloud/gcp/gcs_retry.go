@@ -11,11 +11,13 @@
 package gcp
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/url"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
@@ -31,6 +33,8 @@ import (
 // function, so this can be removed when it is merged:
 // https://github.com/googleapis/google-cloud-go/pull/6370
 func defaultShouldRetry(err error) bool {
+	log.Warningf(context.Background(), "defaultShouldRetry called with err: %v", err)
+
 	if err == nil {
 		return false
 	}

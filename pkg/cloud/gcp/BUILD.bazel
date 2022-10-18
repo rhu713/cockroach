@@ -26,6 +26,7 @@ go_library(
         "//pkg/settings/cluster",
         "//pkg/util/contextutil",
         "//pkg/util/ioctx",
+        "//pkg/util/log",
         "//pkg/util/tracing",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_gogo_protobuf//types",
