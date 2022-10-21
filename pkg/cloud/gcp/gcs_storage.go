@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/types"
@@ -199,6 +200,7 @@ func makeGCSStorage(
 		return nil, errors.Wrap(err, "failed to create google cloud client")
 	}
 	g.SetRetry(gcs.WithErrorFunc(shouldRetry))
+	g.SetRetry(gcs.WithPolicy(gcs.RetryAlways))
 	bucket := g.Bucket(conf.Bucket)
 	if conf.BillingProject != `` {
 		bucket = bucket.UserProject(conf.BillingProject)
@@ -263,13 +265,44 @@ func (g *gcsStorage) Writer(ctx context.Context, basename string) (io.WriteClose
 	sp.RecordStructured(&types.StringValue{Value: fmt.Sprintf("gcs.Writer: %s",
 		path.Join(g.prefix, basename))})
 
-	w := g.bucket.Object(path.Join(g.prefix, basename)).NewWriter(ctx)
+	logf := func(format string, args ...interface{}) {
+		msg := fmt.Sprintf(format, args...)
+		log.Warningf(ctx, "%s", msg)
+	}
+	w := g.bucket.Object(path.Join(g.prefix, basename)).NewWriterWithLogger(ctx, logf)
 	w.ChunkSize = int(cloud.WriteChunkSize.Get(&g.settings.SV))
 	if !gcsChunkingEnabled.Get(&g.settings.SV) {
 		w.ChunkSize = 0
 	}
 	w.ChunkRetryDeadline = gcsChunkRetryTimeout.Get(&g.settings.SV)
-	return w, nil
+
+	return loggedWriterCloser{
+		basename:             basename,
+		internalWriterCloser: w,
+		ctx:                  ctx,
+	}, nil
+}
+
+type loggedWriterCloser struct {
+	basename             string
+	internalWriterCloser io.WriteCloser
+	ctx                  context.Context
+}
+
+func (l loggedWriterCloser) Write(p []byte) (n int, err error) {
+	n, err = l.internalWriterCloser.Write(p)
+	if err != nil {
+		log.Warningf(l.ctx, "rh_debug: error writing %d bytes to file %s: %v", len(p), l.basename, err)
+	}
+	return n, err
+}
+
+func (l loggedWriterCloser) Close() error {
+	err := l.internalWriterCloser.Close()
+	if err != nil {
+		log.Warningf(l.ctx, "rh_debug: error closing writer %s: %v", l.basename, err)
+	}
+	return err
 }
 
 // ReadFile is shorthand for ReadFileAt with offset 0.
@@ -401,3 +434,4 @@ func init() {
 	cloud.RegisterExternalStorageProvider(cloudpb.ExternalStorageProvider_gs,
 		parseGSURL, makeGCSStorage, cloud.RedactedParams(CredentialsParam, BearerTokenParam), gcsScheme)
 }
+

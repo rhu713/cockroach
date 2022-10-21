@@ -8424,10 +8424,10 @@ def go_deps():
         name = "com_google_cloud_go_storage",
         build_file_proto_mode = "disable_global",
         importpath = "cloud.google.com/go/storage",
-        sha256 = "fb7b2e6ffe19ef64c8ccd809a64896e551137bfeb7a9af973dab8ab39da211ec",
-        strip_prefix = "cloud.google.com/go/storage@v1.21.0",
+        sha256 = "15271a7267a616490c0373b5215ed9c287800e3c8b9bf39c30240e325ccab9b7",
+        strip_prefix = "google-cloud-go-03e057c0b656e66539004a954a306f5aabf7fc96/storage",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/cloud.google.com/go/storage/com_google_cloud_go_storage-v1.21.0.zip",
+            "https://github.com/rhu713/google-cloud-go/archive/03e057c0b656e66539004a954a306f5aabf7fc96.zip",
         ],
     )
     go_repository(
