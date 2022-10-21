@@ -413,20 +413,25 @@ func (g *gcsStorage) Close() error {
 // https://github.com/googleapis/google-cloud-go/issues/784
 // Remove if this error ever becomes part of the default retry predicate.
 func shouldRetry(err error) bool {
+	ctx := context.Background()
 	if defaultShouldRetry(err) {
+		log.Warningf(ctx, "defaultShouldRetry true for err: %v", err)
 		return true
 	}
 
 	if e := (http2.StreamError{}); errors.As(err, &e) {
 		if e.Code == http2.ErrCodeInternal {
+			log.Warningf(ctx, "shouldRetry true Stream INTERNAL_ERROR for err: %v", err)
 			return true
 		}
 	}
 
 	if e := (errors.Wrapper)(nil); errors.As(err, &e) {
+		log.Warningf(ctx, "shouldRetry wrapped %v for err: %v", shouldRetry(e.Unwrap()), err)
 		return shouldRetry(e.Unwrap())
 	}
 
+	log.Warningf(ctx, "shouldRetry false for err: %v", err)
 	return false
 }
 
@@ -434,4 +439,3 @@ func init() {
 	cloud.RegisterExternalStorageProvider(cloudpb.ExternalStorageProvider_gs,
 		parseGSURL, makeGCSStorage, cloud.RedactedParams(CredentialsParam, BearerTokenParam), gcsScheme)
 }
-
