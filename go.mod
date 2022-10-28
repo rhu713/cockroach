@@ -4,7 +4,7 @@ go 1.17
 
 require (
 	cloud.google.com/go/kms v1.5.0
-	cloud.google.com/go/pubsub v1.16.0
+	cloud.google.com/go/pubsub v1.25.1
 	cloud.google.com/go/storage v1.27.0
 	github.com/Azure/azure-sdk-for-go v57.1.0+incompatible
 	github.com/Azure/azure-storage-blob-go v0.14.0
@@ -160,7 +160,7 @@ require (
 	golang.org/x/sys v0.1.0
 	golang.org/x/term v0.1.0
 	golang.org/x/text v0.4.0
-	golang.org/x/time v0.0.0-20210723032227-1f47c861a9ac
+	golang.org/x/time v0.0.0-20220609170525-579cf78fd858
 	golang.org/x/tools v0.1.12
 	google.golang.org/api v0.101.0
 	google.golang.org/genproto v0.0.0-20221027153422-115e99e71e1c
@@ -174,8 +174,7 @@ require (
 
 require (
 	cloud.google.com/go v0.105.0 // indirect
-	cloud.google.com/go/compute v1.12.1 // indirect
-	cloud.google.com/go/compute/metadata v0.1.1 // indirect
+	cloud.google.com/go/compute/metadata v0.2.0 // indirect
 	cloud.google.com/go/iam v0.6.0 // indirect
 	cloud.google.com/go/longrunning v0.1.1 // indirect
 	github.com/Azure/azure-pipeline-go v0.2.3 // indirect
