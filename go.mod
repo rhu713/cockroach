@@ -370,3 +370,5 @@ replace go.etcd.io/etcd/pkg/v3 => go.etcd.io/etcd/pkg/v3 v3.0.0-20201109164711-0
 replace github.com/docker/docker => github.com/moby/moby v20.10.6+incompatible
 
 replace github.com/maruel/panicparse/v2 => github.com/cockroachdb/panicparse/v2 v2.0.0-20211103220158-604c82a44f1e
+
+replace google.golang.org/api v0.69.0 => github.com/rhu713/google-api-go-client 509b8f9025b39f983c3bb55e62f61ea71ea56791
