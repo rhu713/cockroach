@@ -9,6 +9,7 @@
 package backupccl
 
 import (
+	"context"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupinfo"
@@ -18,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	spanUtils "github.com/cockroachdb/cockroach/pkg/util/span"
 )
 
@@ -209,6 +211,12 @@ func makeSimpleImportSpans(
 		}
 	}
 
+	depth := 0
+	for _, c := range cover {
+		depth += len(c.Files)
+	}
+
+	log.Infof(context.Background(), "rh_debug makeSimpleImportSpans coverlen=%d avgdepth=%f", len(cover), float64(depth)/float64(len(cover)))
 	return cover
 }
 

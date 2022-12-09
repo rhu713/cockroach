@@ -395,6 +395,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	db := rd.flowCtx.Cfg.DB
 	evalCtx := rd.EvalCtx
 	var summary roachpb.BulkOpSummary
+	log.Infof(ctx, "rh_debug: processRestoreSpanEntry span=%v entries=%d", sst.entry.Span, len(sst.entry.Files))
 
 	entry := sst.entry
 	iter := sst.iter
