@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backuppb"
@@ -74,7 +75,8 @@ type restoreDataProcessor struct {
 	// concurrent workers and sent down the flow by the processor.
 	progCh chan backuppb.RestoreProgress
 
-	agg *bulkutil.TracingAggregator
+	agg         *bulkutil.TracingAggregator
+	parallelism atomic.Int32
 }
 
 var (
@@ -136,13 +138,14 @@ func newRestoreDataProcessor(
 	sv := &flowCtx.Cfg.Settings.SV
 
 	rd := &restoreDataProcessor{
-		flowCtx:    flowCtx,
-		input:      input,
-		spec:       spec,
-		output:     output,
-		progCh:     make(chan backuppb.RestoreProgress, maxConcurrentRestoreWorkers),
-		metaCh:     make(chan *execinfrapb.ProducerMetadata, 1),
-		numWorkers: int(numRestoreWorkers.Get(sv)),
+		flowCtx:     flowCtx,
+		input:       input,
+		spec:        spec,
+		output:      output,
+		progCh:      make(chan backuppb.RestoreProgress, maxConcurrentRestoreWorkers),
+		metaCh:      make(chan *execinfrapb.ProducerMetadata, 1),
+		numWorkers:  int(numRestoreWorkers.Get(sv)),
+		parallelism: atomic.Int32{},
 	}
 
 	if err := rd.Init(ctx, rd, post, restoreDataOutputTypes, flowCtx, processorID, output, nil, /* memMonitor */
@@ -290,7 +293,7 @@ func (rd *restoreDataProcessor) openSSTs(
 	// channel.
 	sendIter := func(iter storage.SimpleMVCCIterator, dirsToSend []cloud.ExternalStorage) error {
 		readAsOfIter := storage.NewReadAsOfIterator(iter, rd.spec.RestoreTime)
-
+		rd.parallelism.Add(1)
 		cleanup := func() {
 			readAsOfIter.Close()
 
@@ -395,11 +398,12 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	db := rd.flowCtx.Cfg.DB
 	evalCtx := rd.EvalCtx
 	var summary roachpb.BulkOpSummary
-	log.Infof(ctx, "rh_debug: processRestoreSpanEntry span=%v entries=%d", sst.entry.Span, len(sst.entry.Files))
+	log.Infof(ctx, "rh_debug: processRestoreSpanEntry span=%v entries=%d parallelism=%v", sst.entry.Span, len(sst.entry.Files), rd.parallelism.Load())
 
 	entry := sst.entry
 	iter := sst.iter
 	defer sst.cleanup()
+	defer rd.parallelism.Add(-1)
 
 	var batcher SSTBatcherExecutor
 	if rd.spec.ValidateOnly {
