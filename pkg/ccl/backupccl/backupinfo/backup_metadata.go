@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
@@ -30,7 +31,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -1450,4 +1453,64 @@ func (bi *bytesIter) close() {
 type resultWrapper struct {
 	key   storage.MVCCKey
 	value []byte
+}
+
+// TODO: add memory monitoring for this.
+func ReadBackupMetadataFromURI(
+	ctx context.Context,
+	uri string,
+	user username.SQLUsername,
+	makeExternalStorageFromURI cloud.ExternalStorageFromURIFactory,
+	encryption *jobspb.BackupEncryptionOptions,
+	kmsEnv cloud.KMSEnv,
+) (*BackupMetadata, error) {
+	exportStore, err := makeExternalStorageFromURI(ctx, uri, user)
+	if err != nil {
+		return nil, err
+	}
+
+	defer exportStore.Close()
+
+	return NewBackupMetadata(ctx, exportStore, MetadataSSTName, encryption, kmsEnv)
+}
+
+func LoadBackupMetadataAtTime(
+	ctx context.Context,
+	mem *mon.BoundAccount,
+	uris []string,
+	user username.SQLUsername,
+	makeExternalStorageFromURI cloud.ExternalStorageFromURIFactory,
+	encryption *jobspb.BackupEncryptionOptions,
+	kmsEnv cloud.KMSEnv,
+	asOf hlc.Timestamp,
+) ([]*BackupMetadata, error) {
+	ctx, sp := tracing.ChildSpan(ctx, "backupinfo.LoadBackupMetadata")
+	defer sp.Finish()
+
+	//backupManifests := make([]backuppb.BackupManifest, len(uris))
+	backupMetadata := make([]*BackupMetadata, len(uris))
+	var reserved int64
+	defer func() {
+		if reserved != 0 {
+			mem.Shrink(ctx, reserved)
+		}
+	}()
+	for i, uri := range uris {
+		// TODO: add mem monitor for this.
+		metadata, err := ReadBackupMetadataFromURI(ctx, uri, user, makeExternalStorageFromURI, encryption, kmsEnv)
+
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to read backup metadata")
+		}
+
+		if !asOf.IsEmpty() && asOf.Less(metadata.StartTime) {
+			break
+		}
+		backupMetadata[i] = metadata
+	}
+	if len(backupMetadata) == 0 {
+		return nil, errors.Newf("no backups found")
+	}
+
+	return backupMetadata, nil
 }

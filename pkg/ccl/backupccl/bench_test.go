@@ -9,11 +9,17 @@
 package backupccl
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupinfo"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl/sampledataccl"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/workload/bank"
+	"github.com/stretchr/testify/require"
 )
 
 func BenchmarkDatabaseBackup(b *testing.B) {
@@ -146,4 +152,36 @@ func BenchmarkDatabaseFullBackup(b *testing.B) {
 	// We report the number of bytes that incremental backup was able to
 	// *skip*--i.e., the number of bytes in the full backup.
 	b.SetBytes(int64(b.N) * dataSize)
+}
+
+func BenchmarkBackupMetadataReading(b *testing.B) {
+	tc, _, _, cleanupFn := backupRestoreTestSetup(b, multiNode,
+		0 /* numAccounts */, InitManualReplication)
+	defer cleanupFn()
+
+	// Overwrite the stats file with some invalid data.
+	ctx := context.Background()
+	execCfg := tc.Server(0).ExecutorConfig().(sql.ExecutorConfig)
+	//store, err := execCfg.DistSQLSrv.ExternalStorageFromURI(ctx, dest, username.RootUserName()
+
+	uri := "gs://rui-backup-test/tpce/23.1/2M/1/2022/12/05-204258.97?AUTH=implicit"
+	b.ResetTimer()
+	manifest, mem, err := backupinfo.ReadBackupManifestFromURI(ctx, nil, uri, username.RootUserName(), execCfg.DistSQLSrv.ExternalStorageFromURI, nil, &testKMSEnv{})
+	bytes1, err := protoutil.Marshal(&manifest)
+	require.NoError(b, err)
+	manifest.Spans = nil
+	manifest.Files = nil
+	manifest.Descriptors = nil
+	manifest.DescriptorChanges = nil
+
+	bytes, err := protoutil.Marshal(&manifest)
+	require.NoError(b, err)
+	fmt.Printf("manifest size before=%d,%d after=%d\n", mem, len(bytes1), len(bytes))
+
+	//for i := 0; i < b.N; i++ {
+	//	_, err = backupinfo.ReadBackupMetadataFromURI(ctx, uri, username.RootUserName(), execCfg.DistSQLSrv.ExternalStorageFromURI, nil,
+	//		&testKMSEnv{})
+	//}
+	//require.NoError(b, err)
+
 }

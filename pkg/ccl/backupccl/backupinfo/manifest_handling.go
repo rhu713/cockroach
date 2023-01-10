@@ -1395,9 +1395,7 @@ func GetBackupManifests(
 		// boundAccount isn't threadsafe so we'll make a new one this goroutine to
 		// pass while reading. When it is done, we'll lock an mu, reserve its size
 		// from the main one tracking the total amount reserved.
-		subMem := mem.Monitor().MakeBoundAccount()
 		g.GoCtx(func(ctx context.Context) error {
-			defer subMem.Close(ctx)
 			// TODO(lucy): We may want to upgrade the table descs to the newer
 			// foreign key representation here, in case there are backups from an
 			// older cluster. Keeping the descriptors as they are works for now
@@ -1405,8 +1403,9 @@ func GetBackupManifests(
 			// but it will be safer for future code to avoid having older-style
 			// descriptors around.
 			uri := backupURIs[i]
+			fmt.Println("@@@ reading backup from uri", uri)
 			desc, size, err := ReadBackupManifestFromURI(
-				ctx, &subMem, uri, user, makeCloudStorage, encryption, kmsEnv,
+				ctx, nil, uri, user, makeCloudStorage, encryption, kmsEnv,
 			)
 			if err != nil {
 				return errors.Wrapf(err, "failed to read backup from %q",
@@ -1420,11 +1419,33 @@ func GetBackupManifests(
 				memMu.total += size
 				manifests[i] = desc
 			}
-			subMem.Shrink(ctx, size)
 			memMu.Unlock()
 
 			return err
 		})
+
+		for t := 0; t < 1000; t++ {
+			g.GoCtx(func(ctx context.Context) error {
+				// TODO(lucy): We may want to upgrade the table descs to the newer
+				// foreign key representation here, in case there are backups from an
+				// older cluster. Keeping the descriptors as they are works for now
+				// since all we need to do is get the past backups' table/index spans,
+				// but it will be safer for future code to avoid having older-style
+				// descriptors around.
+				uri := backupURIs[i]
+				fmt.Println("@@@ reading backup from uri", uri)
+				_, _, err := ReadBackupManifestFromURI(
+					ctx, nil, uri, user, makeCloudStorage, encryption, kmsEnv,
+				)
+				if err != nil {
+					return errors.Wrapf(err, "failed to read backup from %q",
+						backuputils.RedactURIForErrorMessage(uri))
+				}
+
+				return err
+			})
+
+		}
 	}
 
 	if err := g.Wait(); err != nil {
