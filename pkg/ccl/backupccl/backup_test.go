@@ -906,6 +906,11 @@ func backupAndRestore(
 	storageConn := tc.StorageClusterConn()
 	storageSQLDB := sqlutils.MakeSQLRunner(storageConn)
 	{
+		sqlDB.Exec(t, `SET CLUSTER SETTING bulkio.backup.file_size = 1;`)
+		sqlDB.Exec(t, `SET CLUSTER SETTING backup.restore_span.target_size = 1;`)
+	}
+
+	{
 		sqlDB.Exec(t, `CREATE INDEX balance_idx ON data.bank (balance)`)
 		testutils.SucceedsSoon(t, func() error {
 			var unused string

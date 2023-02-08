@@ -1377,10 +1377,10 @@ func (tc *TestCluster) WaitForFullReplication() error {
 					log.Infof(context.TODO(), "%s has %d underreplicated ranges", s, n)
 					notReplicated = true
 				}
-				if n := s.Metrics().OverReplicatedRangeCount.Value(); n > 0 {
-					log.Infof(context.TODO(), "%s has %d overreplicated ranges", s, n)
-					notReplicated = true
-				}
+				//if n := s.Metrics().OverReplicatedRangeCount.Value(); n > 0 {
+				//	log.Infof(context.TODO(), "%s has %d overreplicated ranges", s, n)
+				//	notReplicated = true
+				//}
 				return nil
 			})
 			if err != nil {

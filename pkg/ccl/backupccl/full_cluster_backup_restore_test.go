@@ -1165,3 +1165,44 @@ func TestFullClusterRestoreWithUserIDs(t *testing.T) {
 		{"test3", "NULL", "false", "102"},
 	})
 }
+
+func TestFindStoreErrorRepro(t *testing.T) {
+	const numAccounts = 10000
+	const splitStep = 20
+	ctx := context.Background()
+	_, sqlDB, _, cleanupFn := backupRestoreTestSetup(t, 15, numAccounts, InitManualReplication)
+	defer cleanupFn()
+
+	ensureLeaseholder := func(t *testing.T, sqlDB *sqlutils.SQLRunner, step int) {
+		for i := 0; i < numAccounts; i += step {
+			testutils.SucceedsSoon(t, func() error {
+				stmt := fmt.Sprintf(`ALTER TABLE data.bank SPLIT AT VALUES (%d)`, i)
+				_, err := sqlDB.DB.ExecContext(ctx, stmt)
+				return err
+			})
+		}
+
+		nodeIdx := 0
+		for i := 0; i < numAccounts; i += step {
+			testutils.SucceedsSoon(t, func() error {
+				stmt := fmt.Sprintf(`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[%d], %d)`, nodeIdx+1, i)
+				_, err := sqlDB.DB.ExecContext(ctx, stmt)
+				return err
+			})
+			nodeIdx = (nodeIdx + 1) % multiNode
+		}
+	}
+
+	ensureLeaseholder(t, sqlDB, splitStep)
+	sqlDB.Exec(t, `SET CLUSTER SETTING bulkio.backup.file_size = '1';`)
+	sqlDB.Exec(t, `SET CLUSTER SETTING backup.restore_span.target_size = '1';`)
+
+	sqlDB.Exec(t, `BACKUP DATABASE data INTO $1`, localFoo)
+
+	files := sqlDB.QueryStr(t, `SHOW BACKUP FILES FROM latest IN $1`, localFoo)
+	log.Infof(ctx, "rh_debug: files len=%d", len(files))
+
+	require.Equal(t, len(files), numAccounts/splitStep)
+
+	sqlDB.Exec(t, `RESTORE DATABASE data FROM latest IN $1 WITH new_db_name='restoredb'`, localFoo)
+}

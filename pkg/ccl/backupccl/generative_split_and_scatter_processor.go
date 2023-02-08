@@ -83,7 +83,7 @@ func newGenerativeSplitAndScatterProcessor(
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
 	db := flowCtx.Cfg.DB
-	numChunkSplitAndScatterWorkers := int(spec.NumNodes)
+	numChunkSplitAndScatterWorkers := 100
 	// numEntrySplitWorkers is set to be 2 * numChunkSplitAndScatterWorkers in
 	// order to keep up with the rate at which chunks are split and scattered.
 	// TODO(rui): This tries to cover for a bad scatter by having 2 * the number

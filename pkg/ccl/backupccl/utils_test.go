@@ -80,6 +80,7 @@ func backupRestoreTestSetupWithParams(
 	dir, dirCleanupFn := testutils.TempDir(t)
 	params.ServerArgs.ExternalIODir = dir
 	params.ServerArgs.UseDatabase = "data"
+	fmt.Println("rh_debug: 1")
 	if len(params.ServerArgsPerNode) > 0 {
 		for i := range params.ServerArgsPerNode {
 			param := params.ServerArgsPerNode[i]
@@ -100,9 +101,11 @@ func backupRestoreTestSetupWithParams(
 		SkipJobBootstrap:        true,
 		SkipZoneConfigBootstrap: true,
 	}
+	fmt.Println("rh_debug: 2")
 	tc = testcluster.StartTestCluster(t, clusterSize, params)
+	fmt.Println("rh_debug: 3")
 	init(tc)
-
+	fmt.Println("rh_debug: 4")
 	const payloadSize = 100
 	splits := 10
 	if numAccounts == 0 {
@@ -126,11 +129,12 @@ func backupRestoreTestSetupWithParams(
 	if _, err := workloadsql.Setup(ctx, sqlDB.DB.(*gosql.DB), bankData, l); err != nil {
 		t.Fatalf("%+v", err)
 	}
-
+	fmt.Println("rh_debug: 5")
 	if err := tc.WaitForFullReplication(); err != nil {
 		t.Fatal(err)
 	}
 
+	fmt.Println("rh_debug: 6")
 	cleanupFn := func() {
 		backuptestutils.CheckForInvalidDescriptors(t, tc.Conns[0])
 		tc.Stopper().Stop(ctx) // cleans up in memory storage's auxiliary dirs
