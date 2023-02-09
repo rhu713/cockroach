@@ -11,6 +11,7 @@ package backupccl
 import (
 	"container/heap"
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupencryption"
@@ -517,6 +518,7 @@ func generateAndSendImportSpans(
 			case <-ctx.Done():
 				return ctx.Err()
 			case spanCh <- entry:
+				log.Infof(ctx, "rh_debug: span %v has %d files", entry.Span, len(entry.Files))
 			}
 		}
 
