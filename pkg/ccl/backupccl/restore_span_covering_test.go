@@ -612,3 +612,72 @@ func TestRestoreEntryCover(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreEntryCoverImbalanceWithIndexBuild(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	const numAccounts = 1
+	ctx := context.Background()
+
+	tc, _, _, cleanupFn := backupRestoreTestSetup(t, singleNode, numAccounts,
+		InitManualReplication)
+	defer cleanupFn()
+
+	sp := func(start, end string) roachpb.Span {
+		return roachpb.Span{Key: roachpb.Key(start), EndKey: roachpb.Key(end)}
+	}
+	f := func(start, end, path string) backuppb.BackupManifest_File {
+		return backuppb.BackupManifest_File{Span: sp(start, end), Path: path}
+	}
+	paths := func(names ...string) []execinfrapb.RestoreFileSpec {
+		r := make([]execinfrapb.RestoreFileSpec, len(names))
+		for i := range names {
+			r[i].Path = names[i]
+		}
+		return r
+	}
+
+	spans := []roachpb.Span{sp("/Table/2", "/Table/3"), sp("/Table/3", "/Table/4")}
+	backups := []backuppb.BackupManifest{
+		{Files: []backuppb.BackupManifest_File{f("/Table/2/1", "/Table/2/2", "1"), f("/Table/3/1", "/Table/3/2", "2")}},
+		{Files: []backuppb.BackupManifest_File{f("/Table/2/1", "/Table/2/2", "3"), f("/Table/2/2", "/Table/2/2/1", "3"), f("/Table/2/2/1", "/Table/2/2/2", "4"), f("/Table/2/2/2", "/Table/2/2/3", "5"), f("/Table/2/2/4", "/Table/2/2/5", "6")}},
+	}
+
+	for i := range backups {
+		backups[i].StartTime = hlc.Timestamp{WallTime: int64(i)}
+		backups[i].EndTime = hlc.Timestamp{WallTime: int64(i + 1)}
+
+		for j := range backups[i].Files {
+			// Pretend every span has 1MB.
+			backups[i].Files[j].EntryCounts.DataSize = 1 << 20
+		}
+	}
+
+	emptySpanFrontier, err := spanUtils.MakeFrontier(roachpb.Span{})
+	require.NoError(t, err)
+
+	execCfg := tc.Server(0).ExecutorConfig().(sql.ExecutorConfig)
+	layerToBackupManifestFileIterFactory, err := getBackupManifestFileIters(ctx, &execCfg,
+		backups, nil, nil)
+	require.NoError(t, err)
+	cover, err := makeImportSpans(ctx, spans, backups, layerToBackupManifestFileIterFactory, noSpanTargetSize, emptySpanFrontier, false)
+
+	for _, c := range cover {
+		fmt.Print("@@@ ", c.Span, "->")
+		for _, f := range c.Files {
+			fmt.Print(f.Path, ",")
+		}
+		fmt.Println()
+	}
+
+	require.NoError(t, err)
+	require.Equal(t, []execinfrapb.RestoreSpanEntry{
+		{Span: sp("a", "b"), Files: paths("1", "6")},
+		{Span: sp("b", "c"), Files: paths("1", "4", "6")},
+		{Span: sp("c", "f"), Files: paths("2", "4", "6")},
+		{Span: sp("f", "g"), Files: paths("6")},
+		{Span: sp("g", "h"), Files: paths("5", "6")},
+		{Span: sp("h", "i"), Files: paths("3", "5", "8")},
+		{Span: sp("l", "m"), Files: paths("9")},
+	}, cover)
+}
