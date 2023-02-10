@@ -10,6 +10,7 @@ package backupccl
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupencryption"
@@ -36,6 +37,14 @@ var generativeSplitAndScatterOutputTypes = []*types.T{
 	types.Bytes, // Span key for the range router
 	types.Bytes, // RestoreDataEntry bytes
 }
+
+var numSplitScatterWorkers = settings.RegisterIntSetting(
+	settings.TenantWritable,
+	"bulkio.restore.num_split_scatter_workers",
+	"number of split and scatter workers. If set to 0, this will default to the number of nodes in the cluster.",
+	0,
+	settings.NonNegativeInt,
+)
 
 // generativeSplitAndScatterProcessor is given a backup chain, whose manifests
 // are specified in URIs and iteratively generates RestoreSpanEntries to be
@@ -84,10 +93,15 @@ func newGenerativeSplitAndScatterProcessor(
 ) (execinfra.Processor, error) {
 	db := flowCtx.Cfg.DB
 	numChunkSplitAndScatterWorkers := int(spec.NumNodes)
+	if n := numSplitScatterWorkers.Get(&flowCtx.Cfg.Settings.SV); n > 0 {
+		numChunkSplitAndScatterWorkers = int(n)
+	}
+
 	// numEntrySplitWorkers is set to be 2 * numChunkSplitAndScatterWorkers in
 	// order to keep up with the rate at which chunks are split and scattered.
 	// TODO(rui): This tries to cover for a bad scatter by having 2 * the number
-	// of nodes in the cluster. Does this knob need to be re-tuned?
+	// of numChunkSplitAndScatterWorkers in the cluster. Does this knob need to be
+	// re-tuned?
 	numEntrySplitWorkers := 2 * numChunkSplitAndScatterWorkers
 
 	mkSplitAndScatterer := func() (splitAndScatterer, error) {
