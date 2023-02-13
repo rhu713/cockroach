@@ -13,6 +13,7 @@ package gcp
 import (
 	"context"
 	"encoding/base64"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"io"
 	"net/url"
 	"path"
@@ -292,7 +293,12 @@ func (g *gcsStorage) ReadFileAt(
 		}, // opener
 		nil, //  reader
 		offset,
-		cloud.IsResumableHTTPError,
+		func(err error) bool {
+			retry := cloud.IsResumableHTTPError(err)
+			wrapped := errors.Wrapf(err, "rh_debug: bucket=%v prefix=%s name=%s offset=%d", g.bucket, g.prefix, basename, offset)
+			log.Warningf(ctx, "rh_debug: ReadFileAt retry err=%v", wrapped)
+			return retry
+		},
 		nil, // errFn
 	)
 
@@ -309,6 +315,7 @@ func (g *gcsStorage) ReadFileAt(
 				err.Error(),
 			)
 		}
+		err = errors.Wrapf(err, "rh_debug: bucket=%v prefix=%s name=%s offset=%d", g.bucket, g.prefix, basename, offset)
 		return nil, 0, err
 	}
 	return r, r.Reader.(*gcs.Reader).Attrs.Size, nil
