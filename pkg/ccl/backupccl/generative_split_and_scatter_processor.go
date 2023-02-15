@@ -9,6 +9,7 @@
 package backupccl
 
 import (
+	"time"
 	"context"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 
@@ -357,6 +358,24 @@ func runGenerativeSplitAndScatter(
 
 	importSpanChunksCh := make(chan scatteredChunk, chunkSplitAndScatterWorkers*2)
 
+	entriesByNode := make(map[roachpb.NodeID]int)
+	filesByNode := make(map[roachpb.NodeID]int)
+
+	g2Done := make(chan bool)
+	ticker := time.NewTicker(5 * time.Second)
+	g.GoCtx(func(ctx context.Context) error {
+		for {
+			select {
+			case <-ticker.C:
+				log.Infof(ctx, "======\n\nentries=%v \n\nfiles=%v\n\n======", entriesByNode, filesByNode)
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-g2Done:
+				return nil
+			}
+		}
+	})
+
 	// This group of goroutines processes the chunks from restoreEntryChunksCh.
 	// For each chunk, a split is created at the start key of the next chunk. The
 	// current chunk is then scattered, and the chunk with its destination is
@@ -412,7 +431,9 @@ func runGenerativeSplitAndScatter(
 	// it can close importSpanChunksCh.
 	g.GoCtx(func(ctx context.Context) error {
 		defer close(importSpanChunksCh)
-		return g2.Wait()
+		err := g2.Wait()
+		g2Done <- true
+		return err
 	})
 
 	// This group of goroutines takes chunks that have already been split and
@@ -428,7 +449,8 @@ func runGenerativeSplitAndScatter(
 				for i, importEntry := range importSpanChunk.entries {
 					nextChunkIdx := i + 1
 
-					log.VInfof(ctx, 2, "processing a span [%s,%s)", importEntry.Span.Key, importEntry.Span.EndKey)
+					log.VInfof(ctx, 2, "processing a span [%s,%s) with destination %v", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination)
+
 					var splitKey roachpb.Key
 					if nextChunkIdx < len(importSpanChunk.entries) {
 						// Split at the next entry.
@@ -453,6 +475,8 @@ func runGenerativeSplitAndScatter(
 					case <-ctx.Done():
 						return ctx.Err()
 					case doneScatterCh <- scatteredEntry:
+						entriesByNode[scatteredEntry.node] += 1
+						filesByNode[scatteredEntry.node] += len(scatteredEntry.entry.Files)
 					}
 				}
 			}
