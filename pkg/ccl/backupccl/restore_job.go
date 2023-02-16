@@ -408,6 +408,7 @@ func restore(
 			}
 
 			if sp, ok := mu.inFlightImportSpans[idx]; ok {
+				log.Infof(ctx, "rh_debug: inflight span %v completed", sp)
 				// Assert that we're actually marking the correct span done. See #23977.
 				if !sp.Key.Equal(progDetails.DataSpan.Key) {
 					mu.Unlock()
@@ -424,6 +425,8 @@ func restore(
 					delete(mu.requestsCompleted, j)
 					delete(mu.inFlightImportSpans, j)
 				}
+			} else {
+				log.Infof(ctx, "rh_debug: received progress for prior span num=%d sp=%v", idx, progDetails.DataSpan)
 			}
 			mu.Unlock()
 
