@@ -365,6 +365,7 @@ func restore(
 					mu.Lock()
 					if mu.highWaterMark >= 0 {
 						d.Restore.HighWater = mu.inFlightImportSpans[mu.highWaterMark].Key
+						log.Infof(context.Background(), "new highwater %d %v", mu.highWaterMark, mu.inFlightImportSpans[mu.highWaterMark].Key)
 					}
 					mu.Unlock()
 				default:
@@ -408,7 +409,7 @@ func restore(
 			}
 
 			if sp, ok := mu.inFlightImportSpans[idx]; ok {
-				log.Infof(ctx, "rh_debug: inflight span %v completed", sp)
+				log.Infof(ctx, "rh_debug: inflight idx %d span %v completed (%d - %d) / %d, %v - %v", idx, sp, mu.highWaterMark, mu.ceiling, numImportSpans, mu.inFlightImportSpans[mu.highWaterMark].Key, mu.inFlightImportSpans[mu.ceiling-1].Key)
 				// Assert that we're actually marking the correct span done. See #23977.
 				if !sp.Key.Equal(progDetails.DataSpan.Key) {
 					mu.Unlock()

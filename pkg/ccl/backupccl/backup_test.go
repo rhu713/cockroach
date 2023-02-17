@@ -1630,6 +1630,28 @@ func TestBackupRestoreResume(t *testing.T) {
 		// We backup into two different directories in the tests above so
 		// as to not intefere with each other. However, they should both be
 		// the same to RESTORE so we arbitrarily pick this directory.
+
+		ensureLeaseholder := func(t *testing.T, sqlDB *sqlutils.SQLRunner, step int) {
+			for i := 0; i < numAccounts; i += step {
+				stmt := fmt.Sprintf(`ALTER TABLE data.bank SPLIT AT VALUES (%d)`, i)
+				testutils.SucceedsSoon(t, func() error {
+					_, err := sqlDB.DB.ExecContext(ctx, stmt)
+					return err
+				})
+			}
+
+			for i := 0; i < numAccounts; i += step {
+				stmt := fmt.Sprintf(`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[%d], %d)`, (i%3)+1, i)
+				testutils.SucceedsSoon(t, func() error {
+					_, err := sqlDB.DB.ExecContext(ctx, stmt)
+					return err
+				})
+			}
+		}
+
+		sqlDB.Exec(t, "SET CLUSTER SETTING backup.restore_span.target_size = '1';")
+		sqlDB.Exec(t, `SET CLUSTER SETTING bulkio.backup.file_size = '1'`)
+		ensureLeaseholder(t, sqlDB, 10)
 		restoreDir := "nodelocal://0/restore-backup-progress-directory"
 		sqlDB.Exec(t, `BACKUP DATABASE DATA TO $1`, restoreDir)
 		sqlDB.Exec(t, `CREATE DATABASE restoredb`)
