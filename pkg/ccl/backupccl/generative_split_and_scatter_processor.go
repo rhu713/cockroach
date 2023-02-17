@@ -10,6 +10,7 @@ package backupccl
 
 import (
 	"context"
+	"fmt"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"time"
 
@@ -46,6 +47,14 @@ var numSplitScatterWorkers = settings.RegisterIntSetting(
 	0,
 	settings.NonNegativeInt,
 )
+
+//var maxInFlightEntries = settings.RegisterIntSetting(
+//	settings.TenantWritable,
+//	"bulkio.restore.max_inflight_entries",
+//	"max number of restore span entries inflight",
+//	2000,
+//	settings.NonNegativeInt,
+//)
 
 // generativeSplitAndScatterProcessor is given a backup chain, whose manifests
 // are specified in URIs and iteratively generates RestoreSpanEntries to be
@@ -142,7 +151,7 @@ func newGenerativeSplitAndScatterProcessor(
 		output:                       output,
 		chunkSplitAndScatterers:      chunkSplitAndScatterers,
 		chunkEntrySplitAndScatterers: chunkEntrySplitAndScatterers,
-		// Large enough so that it never blocks.
+		// Large enough so it never blocks.
 		doneScatterCh:     make(chan entryNode, spec.NumEntries),
 		routingDatumCache: make(map[roachpb.NodeID]rowenc.EncDatum),
 	}
@@ -369,7 +378,7 @@ func runGenerativeSplitAndScatter(
 			case <-ticker.C:
 				log.Infof(ctx, "======\n\nentries=%v \n\nfiles=%v\n\n======", entriesByNode, filesByNode)
 			case <-ctx.Done():
-				break
+				return
 			}
 		}
 	}()
@@ -433,14 +442,18 @@ func runGenerativeSplitAndScatter(
 		return err
 	})
 
+	// Large enough so it never blocks.
+	unsortedDoneScatterCh := make(chan entryNode, spec.NumEntries)
 	// This group of goroutines takes chunks that have already been split and
 	// scattered by the previous worker group. These workers create splits at the
 	// start key of the span of every entry of every chunk. After a chunk has been
 	// processed, it is passed to doneScatterCh to signal that the chunk has gone
 	// through the entire split and scatter process.
+	// TODO: comment change
+	g3 := ctxgroup.WithContext(ctx)
 	for worker := 0; worker < len(chunkEntrySplitAndScatterers); worker++ {
 		worker := worker
-		g.GoCtx(func(ctx context.Context) error {
+		g3.GoCtx(func(ctx context.Context) error {
 			for importSpanChunk := range importSpanChunksCh {
 				chunkDestination := importSpanChunk.destination
 				for i, importEntry := range importSpanChunk.entries {
@@ -471,7 +484,7 @@ func runGenerativeSplitAndScatter(
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
-					case doneScatterCh <- scatteredEntry:
+					case unsortedDoneScatterCh <- scatteredEntry:
 						entriesByNode[scatteredEntry.node] += 1
 						filesByNode[scatteredEntry.node] += len(scatteredEntry.entry.Files)
 					}
@@ -480,6 +493,51 @@ func runGenerativeSplitAndScatter(
 			return nil
 		})
 	}
+
+	g.GoCtx(func(ctx context.Context) error {
+		defer close(unsortedDoneScatterCh)
+		return g3.Wait()
+	})
+
+	doneScatteredEntries := make(map[int64]entryNode)
+	g.GoCtx(func(ctx context.Context) error {
+		var nextIndex int64
+
+		for entry := range unsortedDoneScatterCh {
+			doneScatteredEntries[entry.entry.ProgressIdx] = entry
+
+			if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case doneScatterCh <- sendEntry:
+					nextIndex++
+					delete(doneScatteredEntries, nextIndex)
+				}
+			}
+		}
+
+		for nextIndex < spec.NumEntries {
+			if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case doneScatterCh <- sendEntry:
+					nextIndex++
+					delete(doneScatteredEntries, nextIndex)
+				}
+			} else {
+				fmt.Printf("@@@ want to send %d map=%v\n", nextIndex, doneScatteredEntries)
+				select {
+				case <-time.After(time.Second):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}
+		return nil
+	})
 
 	return g.Wait()
 }
