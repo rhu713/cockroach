@@ -410,9 +410,20 @@ func runGenerativeSplitAndScatter(
 					// If scatter failed to find a node for range ingestion, route the range
 					// to the node currently running the split and scatter processor.
 					if nodeID, ok := flowCtx.NodeID.OptionalNodeID(); ok {
+						if len(importSpanChunk.entries) > 0 {
+							// TODO: should we round robin select the node? Also do nodes 1-numNodes
+							// have to exist?
+							if n := len(importSpanChunk.splitKey); n > 0 {
+								nodeID = roachpb.NodeID(int64(importSpanChunk.splitKey[n-1])%spec.NumNodes + 1)
+							}
+
+							log.Warningf(ctx, "scatter returned node 0. "+
+								"Random route span starting at %s node %v", scatterKey, nodeID)
+						} else {
+							log.Warningf(ctx, "scatter returned node 0. "+
+								"Route span starting at %s to current node %v", scatterKey, nodeID)
+						}
 						chunkDestination = nodeID
-						log.Warningf(ctx, "scatter returned node 0. "+
-							"Route span starting at %s to current node %v", scatterKey, nodeID)
 					} else {
 						log.Warningf(ctx, "scatter returned node 0. "+
 							"Route span starting at %s to default stream", scatterKey)
