@@ -9,9 +9,9 @@
 package backupccl
 
 import (
-	"time"
 	"context"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupencryption"
@@ -361,20 +361,18 @@ func runGenerativeSplitAndScatter(
 	entriesByNode := make(map[roachpb.NodeID]int)
 	filesByNode := make(map[roachpb.NodeID]int)
 
-	g2Done := make(chan bool)
 	ticker := time.NewTicker(5 * time.Second)
-	g.GoCtx(func(ctx context.Context) error {
+
+	go func() {
 		for {
 			select {
 			case <-ticker.C:
 				log.Infof(ctx, "======\n\nentries=%v \n\nfiles=%v\n\n======", entriesByNode, filesByNode)
 			case <-ctx.Done():
-				return ctx.Err()
-			case <-g2Done:
-				return nil
+				break
 			}
 		}
-	})
+	}()
 
 	// This group of goroutines processes the chunks from restoreEntryChunksCh.
 	// For each chunk, a split is created at the start key of the next chunk. The
@@ -432,7 +430,6 @@ func runGenerativeSplitAndScatter(
 	g.GoCtx(func(ctx context.Context) error {
 		defer close(importSpanChunksCh)
 		err := g2.Wait()
-		g2Done <- true
 		return err
 	})
 

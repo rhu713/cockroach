@@ -1546,7 +1546,8 @@ func TestBackupRestoreResume(t *testing.T) {
 	ctx := context.Background()
 
 	params := base.TestClusterArgs{ServerArgs: base.TestServerArgs{
-		Knobs: base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()},
+		DisableDefaultTestTenant: true,
+		Knobs:                    base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()},
 	}}
 
 	const numAccounts = 1000
