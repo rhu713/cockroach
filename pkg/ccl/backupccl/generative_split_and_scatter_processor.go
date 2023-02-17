@@ -10,7 +10,6 @@ package backupccl
 
 import (
 	"context"
-	"fmt"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"time"
 
@@ -459,15 +458,18 @@ func runGenerativeSplitAndScatter(
 				for i, importEntry := range importSpanChunk.entries {
 					nextChunkIdx := i + 1
 
-					log.VInfof(ctx, 2, "processing a span [%s,%s) with destination %v", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination)
+					log.VInfof(ctx, 2, "processing a span [%s,%s) with destination %v idx %d", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx)
 
 					var splitKey roachpb.Key
 					if nextChunkIdx < len(importSpanChunk.entries) {
 						// Split at the next entry.
+						log.VInfof(ctx, 2, "splitting a span [%s,%s) with destination %v idx %d", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx)
 						splitKey = importSpanChunk.entries[nextChunkIdx].Span.Key
 						if err := chunkEntrySplitAndScatterers[worker].split(ctx, flowCtx.Codec(), splitKey); err != nil {
+							log.VInfof(ctx, 2, "err splitting a span [%s,%s) with destination %v idx %d %v", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx, err)
 							return err
 						}
+						log.VInfof(ctx, 2, "done splitting a span [%s,%s) with destination %v idx %d", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx)
 					}
 
 					scatteredEntry := entryNode{
@@ -481,10 +483,12 @@ func runGenerativeSplitAndScatter(
 						}
 					}
 
+					log.VInfof(ctx, 2, "done processing a span [%s,%s) with destination %v idx %d", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx)
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
 					case unsortedDoneScatterCh <- scatteredEntry:
+						log.VInfof(ctx, 2, "done sending a span [%s,%s) with destination %v idx %d", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx)
 						entriesByNode[scatteredEntry.node] += 1
 						filesByNode[scatteredEntry.node] += len(scatteredEntry.entry.Files)
 					}
@@ -504,6 +508,7 @@ func runGenerativeSplitAndScatter(
 		var nextIndex int64
 
 		for entry := range unsortedDoneScatterCh {
+			log.VInfof(ctx, 2, "unsorted span [%s,%s) with idx %d", entry.entry.Span.Key, entry.entry.Span.EndKey, entry.entry.ProgressIdx)
 			doneScatteredEntries[entry.entry.ProgressIdx] = entry
 
 			if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
@@ -511,6 +516,7 @@ func runGenerativeSplitAndScatter(
 				case <-ctx.Done():
 					return ctx.Err()
 				case doneScatterCh <- sendEntry:
+					log.VInfof(ctx, 2, "sending unsorted span [%s,%s) with idx %d", entry.entry.Span.Key, entry.entry.Span.EndKey, entry.entry.ProgressIdx)
 					nextIndex++
 					delete(doneScatteredEntries, nextIndex)
 				}
@@ -519,6 +525,7 @@ func runGenerativeSplitAndScatter(
 
 		for nextIndex < spec.NumEntries {
 			if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
+				log.VInfof(ctx, 2, "cleanup send span [%s,%s) with idx %d", sendEntry.entry.Span.Key, sendEntry.entry.Span.EndKey, sendEntry.entry.ProgressIdx)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -527,7 +534,7 @@ func runGenerativeSplitAndScatter(
 					delete(doneScatteredEntries, nextIndex)
 				}
 			} else {
-				fmt.Printf("@@@ want to send %d map=%v\n", nextIndex, doneScatteredEntries)
+				log.Infof(ctx, "rh_debug: want to send idx %d map=%v\n", nextIndex, len(doneScatteredEntries))
 				select {
 				case <-time.After(time.Second):
 					continue
