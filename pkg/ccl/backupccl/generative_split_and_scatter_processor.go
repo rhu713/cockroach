@@ -11,6 +11,7 @@ package backupccl
 import (
 	"context"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -503,38 +504,48 @@ func runGenerativeSplitAndScatter(
 		return g3.Wait()
 	})
 
+	mu := syncutil.Mutex{}
 	doneScatteredEntries := make(map[int64]entryNode)
 	g.GoCtx(func(ctx context.Context) error {
-		var nextIndex int64
-
 		for entry := range unsortedDoneScatterCh {
 			log.VInfof(ctx, 2, "unsorted span [%s,%s) with idx %d", entry.entry.Span.Key, entry.entry.Span.EndKey, entry.entry.ProgressIdx)
+			mu.Lock()
 			doneScatteredEntries[entry.entry.ProgressIdx] = entry
+			mu.Unlock()
 
-			if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case doneScatterCh <- sendEntry:
-					log.VInfof(ctx, 2, "sending unsorted span [%s,%s) with idx %d", entry.entry.Span.Key, entry.entry.Span.EndKey, entry.entry.ProgressIdx)
-					nextIndex++
-					delete(doneScatteredEntries, nextIndex)
-				}
-			}
+			//if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
+			//	select {
+			//	case <-ctx.Done():
+			//		return ctx.Err()
+			//	case doneScatterCh <- sendEntry:
+			//		log.VInfof(ctx, 2, "sending unsorted span [%s,%s) with idx %d", entry.entry.Span.Key, entry.entry.Span.EndKey, entry.entry.ProgressIdx)
+			//		nextIndex++
+			//		delete(doneScatteredEntries, nextIndex)
+			//	}
+			//}
 		}
+		return nil
+	})
 
+	g.GoCtx(func(ctx context.Context) error {
+		var nextIndex int64
 		for nextIndex < spec.NumEntries {
-			if sendEntry, ok := doneScatteredEntries[nextIndex]; ok {
+			mu.Lock()
+			sendEntry, ok := doneScatteredEntries[nextIndex]
+			if ok {
 				log.VInfof(ctx, 2, "cleanup send span [%s,%s) with idx %d", sendEntry.entry.Span.Key, sendEntry.entry.Span.EndKey, sendEntry.entry.ProgressIdx)
 				select {
 				case <-ctx.Done():
+					mu.Unlock()
 					return ctx.Err()
 				case doneScatterCh <- sendEntry:
-					nextIndex++
 					delete(doneScatteredEntries, nextIndex)
+					nextIndex++
 				}
+				mu.Unlock()
 			} else {
-				log.Infof(ctx, "rh_debug: want to send idx %d map=%v\n", nextIndex, len(doneScatteredEntries))
+				log.Infof(ctx, "rh_debug: want to send idx %d map=%v\n", nextIndex, doneScatteredEntries)
+				mu.Unlock()
 				select {
 				case <-time.After(time.Second):
 					continue
