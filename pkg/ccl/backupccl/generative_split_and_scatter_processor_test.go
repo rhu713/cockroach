@@ -110,10 +110,22 @@ func TestRunGenerativeSplitAndScatterContextCancel(t *testing.T) {
 
 	chunkSplitScatterers := []splitAndScatterer{makeSplitAndScatterer(flowCtx.Cfg.DB.KV(), kr)}
 	chunkEntrySpliterScatterers := []splitAndScatterer{makeSplitAndScatterer(flowCtx.Cfg.DB.KV(), kr)}
-
 	// Large enough so doneScatterCh never blocks.
 	doneScatterCh := make(chan entryNode, 1000)
-	err = runGenerativeSplitAndScatter(ctx, &flowCtx, &spec, chunkSplitScatterers, chunkEntrySpliterScatterers, doneScatterCh)
+	gssp := generativeSplitAndScatterProcessor{
+		flowCtx:                       &flowCtx,
+		spec:                          spec,
+		output:                        nil,
+		chunkSplitAndScatterers:       chunkSplitScatterers,
+		chunkEntrySplitAndScatterers:  chunkEntrySpliterScatterers,
+		cancelScatterAndWaitForWorker: nil,
+		doneScatterCh:                 doneScatterCh,
+		routingDatumCache:             nil,
+		cachedNodeIDs:                 nil,
+		scatterErr:                    nil,
+	}
+
+	err = gssp.runGenerativeSplitAndScatter(ctx)
 
 	require.Error(t, err, "context canceled")
 }

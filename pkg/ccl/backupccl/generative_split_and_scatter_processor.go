@@ -10,7 +10,6 @@ package backupccl
 
 import (
 	"context"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupinfo"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backuppb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -44,17 +44,9 @@ var numSplitScatterWorkers = settings.RegisterIntSetting(
 	settings.TenantWritable,
 	"bulkio.restore.num_split_scatter_workers",
 	"number of split and scatter workers. If set to 0, this will default to the number of nodes in the cluster.",
-	0,
+	1,
 	settings.NonNegativeInt,
 )
-
-//var maxInFlightEntries = settings.RegisterIntSetting(
-//	settings.TenantWritable,
-//	"bulkio.restore.max_inflight_entries",
-//	"max number of restore span entries inflight",
-//	2000,
-//	settings.NonNegativeInt,
-//)
 
 // generativeSplitAndScatterProcessor is given a backup chain, whose manifests
 // are specified in URIs and iteratively generates RestoreSpanEntries to be
@@ -88,6 +80,7 @@ type generativeSplitAndScatterProcessor struct {
 	doneScatterCh chan entryNode
 	// A cache for routing datums, so only 1 is allocated per node.
 	routingDatumCache map[roachpb.NodeID]rowenc.EncDatum
+	cachedNodeIDs     []roachpb.NodeID
 	scatterErr        error
 }
 
@@ -185,7 +178,7 @@ func (gssp *generativeSplitAndScatterProcessor) Start(ctx context.Context) {
 		TaskName: "generativeSplitAndScatter-worker",
 		SpanOpt:  stop.ChildSpan,
 	}, func(ctx context.Context) {
-		gssp.scatterErr = runGenerativeSplitAndScatter(scatterCtx, gssp.flowCtx, &gssp.spec, gssp.chunkSplitAndScatterers, gssp.chunkEntrySplitAndScatterers, gssp.doneScatterCh)
+		gssp.scatterErr = gssp.runGenerativeSplitAndScatter(scatterCtx)
 		cancel()
 		close(gssp.doneScatterCh)
 		close(workerDone)
@@ -219,6 +212,7 @@ func (gssp *generativeSplitAndScatterProcessor) Next() (
 		if !ok {
 			routingDatum, _ = routingDatumsForSQLInstance(base.SQLInstanceID(scatteredEntry.node))
 			gssp.routingDatumCache[scatteredEntry.node] = routingDatum
+			gssp.cachedNodeIDs = append(gssp.cachedNodeIDs, scatteredEntry.node)
 		}
 
 		row := rowenc.EncDatumRow{
@@ -280,20 +274,15 @@ type restoreEntryChunk struct {
 	splitKey roachpb.Key
 }
 
-func runGenerativeSplitAndScatter(
+func (gssp *generativeSplitAndScatterProcessor) runGenerativeSplitAndScatter(
 	ctx context.Context,
-	flowCtx *execinfra.FlowCtx,
-	spec *execinfrapb.GenerativeSplitAndScatterSpec,
-	chunkSplitAndScatterers []splitAndScatterer,
-	chunkEntrySplitAndScatterers []splitAndScatterer,
-	doneScatterCh chan<- entryNode,
 ) error {
 	log.Infof(ctx, "Running generative split and scatter with %d total spans, %d chunk size, %d nodes",
-		spec.NumEntries, spec.ChunkSize, spec.NumNodes)
+		gssp.spec.NumEntries, gssp.spec.ChunkSize, gssp.spec.NumNodes)
 	g := ctxgroup.WithContext(ctx)
 
-	chunkSplitAndScatterWorkers := len(chunkSplitAndScatterers)
-	restoreSpanEntriesCh := make(chan execinfrapb.RestoreSpanEntry, chunkSplitAndScatterWorkers*int(spec.ChunkSize))
+	chunkSplitAndScatterWorkers := len(gssp.chunkSplitAndScatterers)
+	restoreSpanEntriesCh := make(chan execinfrapb.RestoreSpanEntry, chunkSplitAndScatterWorkers*int(gssp.spec.ChunkSize))
 
 	// This goroutine generates import spans one at a time and sends them to
 	// restoreSpanEntriesCh.
@@ -301,32 +290,32 @@ func runGenerativeSplitAndScatter(
 		defer close(restoreSpanEntriesCh)
 
 		backups, layerToFileIterFactory, err := makeBackupMetadata(ctx,
-			flowCtx, spec)
+			gssp.flowCtx, &gssp.spec)
 		if err != nil {
 			return err
 		}
 
-		introducedSpanFrontier, err := createIntroducedSpanFrontier(backups, spec.EndTime)
+		introducedSpanFrontier, err := createIntroducedSpanFrontier(backups, gssp.spec.EndTime)
 		if err != nil {
 			return err
 		}
 
-		backupLocalityMap, err := makeBackupLocalityMap(spec.BackupLocalityInfo, spec.User())
+		backupLocalityMap, err := makeBackupLocalityMap(gssp.spec.BackupLocalityInfo, gssp.spec.User())
 		if err != nil {
 			return err
 		}
 
 		return generateAndSendImportSpans(
 			ctx,
-			spec.Spans,
+			gssp.spec.Spans,
 			backups,
 			layerToFileIterFactory,
 			backupLocalityMap,
 			introducedSpanFrontier,
-			spec.HighWater,
-			spec.TargetSize,
+			gssp.spec.HighWater,
+			gssp.spec.TargetSize,
 			restoreSpanEntriesCh,
-			spec.UseSimpleImportSpans,
+			gssp.spec.UseSimpleImportSpans,
 		)
 	})
 
@@ -343,7 +332,7 @@ func runGenerativeSplitAndScatter(
 		for entry := range restoreSpanEntriesCh {
 			entry.ProgressIdx = idx
 			idx++
-			if len(chunk.entries) == int(spec.ChunkSize) {
+			if len(chunk.entries) == int(gssp.spec.ChunkSize) {
 				chunk.splitKey = entry.Span.Key
 				select {
 				case <-ctx.Done():
@@ -398,24 +387,21 @@ func runGenerativeSplitAndScatter(
 				if !importSpanChunk.splitKey.Equal(roachpb.Key{}) {
 					// Split at the start of the next chunk, to partition off a
 					// prefix of the space to scatter.
-					if err := chunkSplitAndScatterers[worker].split(ctx, flowCtx.Codec(), importSpanChunk.splitKey); err != nil {
+					if err := gssp.chunkSplitAndScatterers[worker].split(ctx, gssp.flowCtx.Codec(), importSpanChunk.splitKey); err != nil {
 						return err
 					}
 				}
-				chunkDestination, err := chunkSplitAndScatterers[worker].scatter(ctx, flowCtx.Codec(), scatterKey)
+				chunkDestination, err := gssp.chunkSplitAndScatterers[worker].scatter(ctx, gssp.flowCtx.Codec(), scatterKey)
 				if err != nil {
 					return err
 				}
 				if chunkDestination == 0 {
 					// If scatter failed to find a node for range ingestion, route the range
-					// to the node currently running the split and scatter processor.
-					if nodeID, ok := flowCtx.NodeID.OptionalNodeID(); ok {
-						if len(importSpanChunk.entries) > 0 {
-							// TODO: should we round robin select the node? Also do nodes 1-numNodes
-							// have to exist?
-							if n := len(importSpanChunk.splitKey); n > 0 {
-								nodeID = roachpb.NodeID(int64(importSpanChunk.splitKey[n-1])%spec.NumNodes + 1)
-							}
+					// to a random node that's already been scattered to so far.
+					if nodeID, ok := gssp.flowCtx.NodeID.OptionalNodeID(); ok {
+						if len(gssp.cachedNodeIDs) > 0 && len(importSpanChunk.splitKey) > 0 {
+							randomNum := int(importSpanChunk.splitKey[len(importSpanChunk.splitKey)-1])
+							nodeID = gssp.cachedNodeIDs[randomNum%len(gssp.cachedNodeIDs)]
 
 							log.Warningf(ctx, "scatter returned node 0. "+
 								"Random route span starting at %s node %v", scatterKey, nodeID)
@@ -454,7 +440,7 @@ func runGenerativeSplitAndScatter(
 	})
 
 	// Large enough so it never blocks.
-	unsortedDoneScatterCh := make(chan entryNode, spec.NumEntries)
+	unsortedDoneScatterCh := make(chan entryNode, gssp.spec.NumEntries)
 	// This group of goroutines takes chunks that have already been split and
 	// scattered by the previous worker group. These workers create splits at the
 	// start key of the span of every entry of every chunk. After a chunk has been
@@ -462,7 +448,7 @@ func runGenerativeSplitAndScatter(
 	// through the entire split and scatter process.
 	// TODO: comment change
 	g3 := ctxgroup.WithContext(ctx)
-	for worker := 0; worker < len(chunkEntrySplitAndScatterers); worker++ {
+	for worker := 0; worker < len(gssp.chunkEntrySplitAndScatterers); worker++ {
 		worker := worker
 		g3.GoCtx(func(ctx context.Context) error {
 			for importSpanChunk := range importSpanChunksCh {
@@ -477,7 +463,7 @@ func runGenerativeSplitAndScatter(
 						// Split at the next entry.
 						log.VInfof(ctx, 2, "splitting a span [%s,%s) with destination %v idx %d", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx)
 						splitKey = importSpanChunk.entries[nextChunkIdx].Span.Key
-						if err := chunkEntrySplitAndScatterers[worker].split(ctx, flowCtx.Codec(), splitKey); err != nil {
+						if err := gssp.chunkEntrySplitAndScatterers[worker].split(ctx, gssp.flowCtx.Codec(), splitKey); err != nil {
 							log.VInfof(ctx, 2, "err splitting a span [%s,%s) with destination %v idx %d %v", importEntry.Span.Key, importEntry.Span.EndKey, importSpanChunk.destination, importEntry.ProgressIdx, err)
 							return err
 						}
@@ -489,7 +475,7 @@ func runGenerativeSplitAndScatter(
 						node:  chunkDestination,
 					}
 
-					if restoreKnobs, ok := flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
+					if restoreKnobs, ok := gssp.flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
 						if restoreKnobs.RunAfterSplitAndScatteringEntry != nil {
 							restoreKnobs.RunAfterSplitAndScatteringEntry(ctx)
 						}
@@ -540,7 +526,7 @@ func runGenerativeSplitAndScatter(
 
 	g.GoCtx(func(ctx context.Context) error {
 		var nextIndex int64
-		for nextIndex < spec.NumEntries {
+		for nextIndex < gssp.spec.NumEntries {
 			mu.Lock()
 			sendEntry, ok := doneScatteredEntries[nextIndex]
 			if ok {
@@ -549,7 +535,7 @@ func runGenerativeSplitAndScatter(
 				case <-ctx.Done():
 					mu.Unlock()
 					return ctx.Err()
-				case doneScatterCh <- sendEntry:
+				case gssp.doneScatterCh <- sendEntry:
 					delete(doneScatteredEntries, nextIndex)
 					nextIndex++
 				}
