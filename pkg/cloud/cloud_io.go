@@ -162,7 +162,8 @@ type ResumingReader struct {
 	Pos          int64            // How much data was received so far
 	RetryOnErrFn func(error) bool // custom retry-on-error function
 	// ErrFn injects a delay between retries on errors. nil means no delay.
-	ErrFn func(error) time.Duration
+	ErrFn      func(error) time.Duration
+	oneTimeErr error
 }
 
 var _ ioctx.ReadCloserCtx = &ResumingReader{}
@@ -176,6 +177,7 @@ func NewResumingReader(
 	retryOnErrFn func(error) bool,
 	errFn func(error) time.Duration,
 ) *ResumingReader {
+	log.Infof(ctx, "rh_debug: new resuming reader at pos=%d", pos)
 	r := &ResumingReader{
 		Opener:       opener,
 		Reader:       reader,
@@ -193,9 +195,12 @@ func NewResumingReader(
 // Open opens the reader at its current offset.
 func (r *ResumingReader) Open(ctx context.Context) error {
 	return DelayedRetry(ctx, "Open", r.ErrFn, func() error {
-		var readErr error
-		r.Reader, readErr = r.Opener(ctx, r.Pos)
-		return readErr
+		reader, err := r.Opener(ctx, r.Pos)
+		if err != nil {
+			return err
+		}
+		r.Reader = reader
+		return nil
 	})
 }
 
@@ -212,6 +217,13 @@ func (r *ResumingReader) Read(ctx context.Context, p []byte) (int, error) {
 
 		if lastErr == nil {
 			n, readErr := r.Reader.Read(p)
+
+			// inject error that happens at end and only once.
+			if r.Pos == 293200 && r.oneTimeErr == nil {
+				readErr = sysutil.ECONNRESET
+				r.oneTimeErr = readErr
+			}
+
 			if readErr == nil || readErr == io.EOF {
 				r.Pos += int64(n)
 				return n, readErr

@@ -11,11 +11,13 @@ package storageccl
 import (
 	"bytes"
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
+	_ "github.com/cockroachdb/cockroach/pkg/cloud/gcp"
 	_ "github.com/cockroachdb/cockroach/pkg/cloud/nodelocal"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -162,11 +164,63 @@ func TestNewExternalSSTReader(t *testing.T) {
 
 	iter, err := ExternalSSTReader(ctx, fileStores, nil, iterOpts)
 	require.NoError(t, err)
-	for iter.SeekGE(storage.MVCCKey{Key: keys.LocalMax}); ; iter.Next() {
+	for iter.SeekGE(storage.MVCCKey{}); ; iter.Next() {
 		ok, err := iter.Valid()
 		require.NoError(t, err)
 		if !ok {
 			break
 		}
 	}
+}
+
+func TestNewExternalSSTReaderGCS(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	tempDir, dirCleanupFn := testutils.TempDir(t)
+	defer dirCleanupFn()
+	args := base.TestServerArgs{ExternalIODir: tempDir}
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: args})
+	defer tc.Stopper().Stop(ctx)
+
+	storeURI := "gs://rui-backup-test/tpce/23.1-filesList/10M/200-inc/3/incrementals/2023/02/09-073930.67/20230211/090000.00/?AUTH=implicit"
+	file := "data/838977472455573572.sst"
+	user := username.RootUserName()
+	testSettings := cluster.MakeTestingClusterSettings()
+
+	ioConf := base.ExternalIODirConfig{}
+	conf, err := cloud.ExternalStorageConfFromURI(storeURI, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Setup a sink for the given args.
+	clientFactory := blobs.TestBlobServiceClient(testSettings.ExternalIODir)
+	s, err := cloud.MakeExternalStorage(ctx, conf, ioConf, testSettings, clientFactory,
+		nil, nil, cloud.NilMetrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if readConf := s.Conf(); readConf != conf {
+		t.Fatalf("conf does not roundtrip: started with %+v, got back %+v", conf, readConf)
+	}
+
+	var iterOpts = storage.IterOptions{
+		KeyTypes:   storage.IterKeyTypePointsAndRanges,
+		LowerBound: keys.LocalMax,
+		UpperBound: keys.MaxKey,
+	}
+
+	var fileStores []StoreFile
+	fileStores = append(fileStores, StoreFile{
+		Store:    s,
+		FilePath: file,
+	})
+
+	iter, err := ExternalSSTReader(ctx, fileStores, nil, iterOpts)
+	require.NoError(t, err)
+
+	iter.SeekGE(storage.MVCCKey{})
 }
