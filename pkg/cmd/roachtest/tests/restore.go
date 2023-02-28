@@ -16,9 +16,11 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
 	"math/rand"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -664,6 +666,164 @@ func registerRestore(r registry.Registry) {
 			// should have succeeded. This final check ensures this test is actually
 			// doing its job: causing the restore job to pause at least once.
 			require.NotEqual(t, 3, maxPauses, "the job should have paused at least once")
+		},
+	})
+
+	planAndRunRestore := func(t test.Test, c cluster.Cluster, nodeToRunRestore option.NodeListOption,
+		nodesWithAdoptionDisabled option.NodeListOption, restoreStmt string) versionStep {
+		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+			gatewayDB := c.Conn(ctx, t.L(), nodeToRunRestore[0])
+			defer gatewayDB.Close()
+			t.Status("Running: ", restoreStmt)
+			var jobID jobspb.JobID
+			err := gatewayDB.QueryRow(restoreStmt).Scan(&jobID)
+			require.NoError(t, err)
+			waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled)
+		}
+	}
+
+	r.Add(registry.TestSpec{
+		Name:              "restore/mixed-version-basic",
+		Owner:             registry.OwnerDisasterRecovery,
+		Cluster:           r.MakeClusterSpec(4),
+		EncryptionSupport: registry.EncryptionMetamorphic,
+		RequiresLicense:   true,
+		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			if c.IsLocal() && runtime.GOARCH == "arm64" {
+				t.Skip("Skip under ARM64. See https://github.com/cockroachdb/cockroach/issues/89268")
+			}
+			roachNodes := c.All()
+			upgradedNodes := c.Nodes(1, 2)
+			oldNodes := c.Nodes(3, 4)
+			predV, err := clusterupgrade.PredecessorVersion(*t.BuildVersion())
+			require.NoError(t, err)
+			c.Put(ctx, t.DeprecatedWorkload(), "./workload")
+
+			// fingerprints stores the fingerprint of the `bank.bank` table at
+			// different points of this test to compare against the restored table at
+			// the end of the test.
+			//fingerprints := make(map[string]string)
+			u := newVersionUpgradeTest(c,
+				uploadAndStart(roachNodes, predV),
+				waitForUpgradeStep(roachNodes),
+				preventAutoUpgradeStep(1),
+				setShortJobIntervalsStep(1),
+				// Upgrade some nodes.
+				binaryUpgradeStep(upgradedNodes, clusterupgrade.MainVersion),
+
+				// Let us first test planning and executing a backup on different node
+				// versions.
+				//
+				// NB: All backups in this test are writing to node 1's ExternalIODir
+				// for simplicity.
+
+				// Case 1: plan backup    -> old node
+				//         execute backup -> upgraded node
+				//
+				// Halt job execution on older nodes.
+				disableJobAdoptionStep(c, oldNodes),
+
+				// Run a backup from an old node so that it is planned on the old node
+				// but the job is adopted on a new node.
+				planAndRunRestore(t, c, oldNodes.RandNode(), oldNodes,
+					`RESTORE FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH DETACHED`),
+
+				//// Write some data between backups.
+				//writeToBankStep(1),
+				//
+				//// Run an incremental backup from an old node so that it is planned on
+				//// the old node but the job is adopted on a new node.
+				//planAndRunBackup(t, c, oldNodes.RandNode(), oldNodes,
+				//	`BACKUP TABLE bank.bank INTO LATEST IN 'nodelocal://1/plan-old-resume-new' WITH detached`),
+				//
+				//// Save fingerprint to compare against restore below.
+				//saveFingerprintStep(1, fingerprints, "nodelocal://1/plan-old-resume-new"),
+				//
+				//enableJobAdoptionStep(c, oldNodes),
+				//
+				//// Case 2: plan backup    -> upgraded node
+				////         execute backup -> old node
+				////
+				//// Halt job execution on upgraded nodes.
+				//disableJobAdoptionStep(c, upgradedNodes),
+				//
+				//// Run a backup from a new node so that it is planned on the new node
+				//// but the job is adopted on an old node.
+				//planAndRunBackup(t, c, upgradedNodes.RandNode(), upgradedNodes,
+				//	`BACKUP TABLE bank.bank INTO 'nodelocal://1/plan-new-resume-old' WITH detached`),
+				//
+				//writeToBankStep(1),
+				//
+				//// Run an incremental backup from a new node so that it is planned on
+				//// the new node but the job is adopted on an old node.
+				//planAndRunBackup(t, c, upgradedNodes.RandNode(), upgradedNodes,
+				//	`BACKUP TABLE bank.bank INTO LATEST IN 'nodelocal://1/plan-new-resume-old' WITH detached`),
+				//
+				//// Save fingerprint to compare against restore below.
+				//saveFingerprintStep(1, fingerprints, "nodelocal://1/plan-new-resume-old"),
+				//
+				//enableJobAdoptionStep(c, upgradedNodes),
+				//
+				//// Now let us test building an incremental chain on top of a full backup
+				//// created by a node of a different version.
+				////
+				//// Case 1: full backup -> new nodes
+				////         inc backup  -> old nodes
+				//disableJobAdoptionStep(c, oldNodes),
+				//// Plan and run a full backup on the new nodes.
+				//planAndRunBackup(t, c, upgradedNodes.RandNode(), oldNodes,
+				//	`BACKUP TABLE bank.bank INTO 'nodelocal://1/new-node-full-backup' WITH detached`),
+				//
+				//writeToBankStep(1),
+				//
+				//// Set up the cluster so that only the old nodes plan and run the
+				//// incremental backup.
+				//enableJobAdoptionStep(c, oldNodes),
+				//disableJobAdoptionStep(c, upgradedNodes),
+				//
+				//// Run an incremental (on old nodes) on top of a full backup taken by
+				//// nodes on the upgraded version.
+				//planAndRunBackup(t, c, oldNodes.RandNode(), upgradedNodes,
+				//	`BACKUP TABLE bank.bank INTO LATEST IN 'nodelocal://1/new-node-full-backup' WITH detached`),
+				//
+				//// Save fingerprint to compare against restore below.
+				//saveFingerprintStep(1, fingerprints, "nodelocal://1/new-node-full-backup"),
+				//
+				//// Case 2: full backup -> old nodes
+				////         inc backup  -> new nodes
+				//
+				//// Plan and run a full backup on the old nodes.
+				//planAndRunBackup(t, c, oldNodes.RandNode(), upgradedNodes,
+				//	`BACKUP TABLE bank.bank INTO 'nodelocal://1/old-node-full-backup' WITH detached`),
+				//
+				//writeToBankStep(1),
+				//
+				//enableJobAdoptionStep(c, upgradedNodes),
+				//
+				//// Allow all the nodes to now finalize their cluster version.
+				//binaryUpgradeStep(oldNodes, clusterupgrade.MainVersion),
+				//allowAutoUpgradeStep(1),
+				//waitForUpgradeStep(roachNodes),
+				//
+				//// Run an incremental on top of a full backup taken by nodes on the
+				//// old version.
+				//planAndRunBackup(t, c, roachNodes.RandNode(), nil,
+				//	`BACKUP TABLE bank.bank INTO LATEST IN 'nodelocal://1/old-node-full-backup' WITH detached`),
+				//
+				//// Save fingerprint to compare against restore below.
+				//saveFingerprintStep(1, fingerprints, "nodelocal://1/old-node-full-backup"),
+				//
+				//// Verify all the backups are actually restoreable.
+				//verifyBackupStep(roachNodes.RandNode(), "nodelocal://1/plan-old-resume-new",
+				//	"bank", "bank", "bank1", fingerprints),
+				//verifyBackupStep(roachNodes.RandNode(), "nodelocal://1/plan-new-resume-old",
+				//	"bank", "bank", "bank2", fingerprints),
+				//verifyBackupStep(roachNodes.RandNode(), "nodelocal://1/new-node-full-backup",
+				//	"bank", "bank", "bank3", fingerprints),
+				//verifyBackupStep(roachNodes.RandNode(), "nodelocal://1/old-node-full-backup",
+				//	"bank", "bank", "bank4", fingerprints),
+			)
+			u.run(ctx, t)
 		},
 	})
 
