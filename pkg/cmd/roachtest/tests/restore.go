@@ -675,9 +675,10 @@ func registerRestore(r registry.Registry) {
 			gatewayDB := c.Conn(ctx, t.L(), nodeToRunRestore[0])
 			defer gatewayDB.Close()
 			t.Status("Running: ", restoreStmt)
-			_, err := gatewayDB.Exec(restoreStmt)
+			var jobID jobspb.JobID
+			err := gatewayDB.QueryRow(restoreStmt).Scan(&jobID)
 			require.NoError(t, err)
-			//waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled)
+			waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled, 30*time.Minute)
 		}
 	}
 
@@ -798,7 +799,7 @@ func registerRestore(r registry.Registry) {
 				// but the job is adopted on a new node.
 				// TODO: change this database name
 				planAndRunRestore(t, c, oldNodes.RandNode(), oldNodes,
-					`RESTORE DATABASE defaultdb FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH new_db_name='restore_old_plan_new_exec'`),
+					`RESTORE DATABASE defaultdb FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH DETACHED, new_db_name='restore_old_plan_new_exec'`),
 
 				//// Write some data between backups.
 				//writeToBankStep(1),
@@ -821,8 +822,8 @@ func registerRestore(r registry.Registry) {
 
 				//// Run a backup from a new node so that it is planned on the new node
 				//// but the job is adopted on an old node.
-				planAndRunRestore(t, c, oldNodes.RandNode(), oldNodes,
-					`RESTORE DATABASE defaultdb FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH new_db_name='restore_new_plan_old_exec'`),
+				planAndRunRestore(t, c, upgradedNodes.RandNode(), upgradedNodes,
+					`RESTORE DATABASE defaultdb FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH DETACHED, new_db_name='restore_new_plan_old_exec'`),
 				saveFingerprintStep(1, fingerprints, "restore_new_plan_old_exec"),
 
 				verifyFingerprintsStep(fingerprints),
