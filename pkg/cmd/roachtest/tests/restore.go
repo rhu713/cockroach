@@ -675,10 +675,81 @@ func registerRestore(r registry.Registry) {
 			gatewayDB := c.Conn(ctx, t.L(), nodeToRunRestore[0])
 			defer gatewayDB.Close()
 			t.Status("Running: ", restoreStmt)
-			var jobID jobspb.JobID
-			err := gatewayDB.QueryRow(restoreStmt).Scan(&jobID)
+			_, err := gatewayDB.Exec(restoreStmt)
 			require.NoError(t, err)
-			waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled)
+			//waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled)
+		}
+	}
+
+	fingerprint := func(ctx context.Context, conn *gosql.DB, db string) (string, error) {
+		var b strings.Builder
+
+		var tables []string
+		rows, err := conn.QueryContext(
+			ctx,
+			fmt.Sprintf("SELECT table_name FROM [SHOW TABLES FROM %s] ORDER BY table_name", db),
+		)
+		if err != nil {
+			return "", err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return "", err
+			}
+			tables = append(tables, name)
+		}
+
+		for _, table := range tables {
+			fmt.Fprintf(&b, "table %s\n", table)
+			query := fmt.Sprintf("SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE %s.%s", db, table)
+			rows, err = conn.QueryContext(ctx, query)
+			if err != nil {
+				return "", err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var name, fp string
+				if err := rows.Scan(&name, &fp); err != nil {
+					return "", err
+				}
+				fmt.Fprintf(&b, "%s: %s\n", name, fp)
+			}
+		}
+
+		return b.String(), rows.Err()
+	}
+
+	saveFingerprintStep := func(node int, fingerprints map[string]string, database string) versionStep {
+		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+			db := u.conn(ctx, t, node)
+
+			f, err := fingerprint(ctx, db, database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fingerprints[database] = f
+		}
+	}
+
+	verifyFingerprintsStep := func(fingerprints map[string]string) versionStep {
+		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+			require.Greater(t, len(fingerprints), 1)
+
+			keys := make([]string, 0, len(fingerprints))
+			for k := range fingerprints {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+
+			expectedFingerprint := fingerprints[keys[0]]
+			for i := 1; i < len(keys); i++ {
+				require.Equal(t, expectedFingerprint, fingerprints[keys[i]],
+					fmt.Sprintf("expected fingerprint %s for key %s to equal fingerprint %s for key %s",
+						fingerprints[keys[i]], keys[i], expectedFingerprint, keys[0]))
+			}
+
 		}
 	}
 
@@ -702,7 +773,7 @@ func registerRestore(r registry.Registry) {
 			// fingerprints stores the fingerprint of the `bank.bank` table at
 			// different points of this test to compare against the restored table at
 			// the end of the test.
-			//fingerprints := make(map[string]string)
+			fingerprints := make(map[string]string)
 			u := newVersionUpgradeTest(c,
 				uploadAndStart(roachNodes, predV),
 				waitForUpgradeStep(roachNodes),
@@ -725,8 +796,9 @@ func registerRestore(r registry.Registry) {
 
 				// Run a backup from an old node so that it is planned on the old node
 				// but the job is adopted on a new node.
+				// TODO: change this database name
 				planAndRunRestore(t, c, oldNodes.RandNode(), oldNodes,
-					`RESTORE FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH DETACHED`),
+					`RESTORE DATABASE defaultdb FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH new_db_name='restore_old_plan_new_exec'`),
 
 				//// Write some data between backups.
 				//writeToBankStep(1),
@@ -737,33 +809,23 @@ func registerRestore(r registry.Registry) {
 				//	`BACKUP TABLE bank.bank INTO LATEST IN 'nodelocal://1/plan-old-resume-new' WITH detached`),
 				//
 				//// Save fingerprint to compare against restore below.
-				//saveFingerprintStep(1, fingerprints, "nodelocal://1/plan-old-resume-new"),
+				saveFingerprintStep(1, fingerprints, "restore_old_plan_new_exec"),
+
+				enableJobAdoptionStep(c, oldNodes),
+
+				// Case 2: plan backup    -> upgraded node
+				//         execute backup -> old node
 				//
-				//enableJobAdoptionStep(c, oldNodes),
-				//
-				//// Case 2: plan backup    -> upgraded node
-				////         execute backup -> old node
-				////
-				//// Halt job execution on upgraded nodes.
-				//disableJobAdoptionStep(c, upgradedNodes),
-				//
+				// Halt job execution on upgraded nodes.
+				disableJobAdoptionStep(c, upgradedNodes),
+
 				//// Run a backup from a new node so that it is planned on the new node
 				//// but the job is adopted on an old node.
-				//planAndRunBackup(t, c, upgradedNodes.RandNode(), upgradedNodes,
-				//	`BACKUP TABLE bank.bank INTO 'nodelocal://1/plan-new-resume-old' WITH detached`),
-				//
-				//writeToBankStep(1),
-				//
-				//// Run an incremental backup from a new node so that it is planned on
-				//// the new node but the job is adopted on an old node.
-				//planAndRunBackup(t, c, upgradedNodes.RandNode(), upgradedNodes,
-				//	`BACKUP TABLE bank.bank INTO LATEST IN 'nodelocal://1/plan-new-resume-old' WITH detached`),
-				//
-				//// Save fingerprint to compare against restore below.
-				//saveFingerprintStep(1, fingerprints, "nodelocal://1/plan-new-resume-old"),
-				//
-				//enableJobAdoptionStep(c, upgradedNodes),
-				//
+				planAndRunRestore(t, c, oldNodes.RandNode(), oldNodes,
+					`RESTORE DATABASE defaultdb FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=1000/v22.2.0/inc-count=10/?AUTH=implicit' WITH new_db_name='restore_new_plan_old_exec'`),
+				saveFingerprintStep(1, fingerprints, "restore_new_plan_old_exec"),
+
+				verifyFingerprintsStep(fingerprints),
 				//// Now let us test building an incremental chain on top of a full backup
 				//// created by a node of a different version.
 				////
