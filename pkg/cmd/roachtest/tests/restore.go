@@ -19,6 +19,7 @@ import (
 	"math/rand"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -27,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -772,6 +774,159 @@ func registerRestore(r registry.Registry) {
 			},
 		})
 	}
+}
+
+func registerRestoreMixedVersion(r registry.Registry) {
+	planAndRunRestore := func(t test.Test, c cluster.Cluster, nodeToRunRestore option.NodeListOption,
+		nodesWithAdoptionDisabled option.NodeListOption, restoreStmt string) versionStep {
+		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+			gatewayDB := c.Conn(ctx, t.L(), nodeToRunRestore[0])
+			defer gatewayDB.Close()
+			t.Status("Running: ", restoreStmt)
+			var jobID jobspb.JobID
+			err := gatewayDB.QueryRow(restoreStmt).Scan(&jobID)
+			require.NoError(t, err)
+			waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled, 3*time.Hour)
+		}
+	}
+
+	fingerprint := func(ctx context.Context, conn *gosql.DB, db string) (string, error) {
+		var b strings.Builder
+
+		var tables []string
+		rows, err := conn.QueryContext(
+			ctx,
+			fmt.Sprintf("SELECT table_name FROM [SHOW TABLES FROM %s] ORDER BY table_name", db),
+		)
+		if err != nil {
+			return "", err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return "", err
+			}
+			tables = append(tables, name)
+		}
+
+		for _, table := range tables {
+			fmt.Fprintf(&b, "table %s\n", table)
+			query := fmt.Sprintf("SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE %s.%s", db, table)
+			rows, err = conn.QueryContext(ctx, query)
+			if err != nil {
+				return "", err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var name, fp string
+				if err := rows.Scan(&name, &fp); err != nil {
+					return "", err
+				}
+				fmt.Fprintf(&b, "%s: %s\n", name, fp)
+			}
+		}
+
+		return b.String(), rows.Err()
+	}
+
+	saveFingerprintStep := func(node int, fingerprints map[string]string, database string) versionStep {
+		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+			db := u.conn(ctx, t, node)
+
+			f, err := fingerprint(ctx, db, database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fingerprints[database] = f
+		}
+	}
+
+	verifyFingerprintsStep := func(fingerprints map[string]string) versionStep {
+		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+			require.Greater(t, len(fingerprints), 1)
+
+			keys := make([]string, 0, len(fingerprints))
+			for k := range fingerprints {
+				require.NotEqual(t, "", fingerprints[k])
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+
+			expectedFingerprint := fingerprints[keys[0]]
+			for i := 1; i < len(keys); i++ {
+				require.Equal(t, expectedFingerprint, fingerprints[keys[i]],
+					fmt.Sprintf("expected fingerprint %s for key %s to equal fingerprint %s for key %s",
+						fingerprints[keys[i]], keys[i], expectedFingerprint, keys[0]))
+			}
+
+		}
+	}
+
+	r.Add(registry.TestSpec{
+		Name:              "restore/mixed-version-basic",
+		Owner:             registry.OwnerDisasterRecovery,
+		Cluster:           r.MakeClusterSpec(4),
+		EncryptionSupport: registry.EncryptionMetamorphic,
+		RequiresLicense:   true,
+		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			if c.IsLocal() && runtime.GOARCH == "arm64" {
+				t.Skip("Skip under ARM64. See https://github.com/cockroachdb/cockroach/issues/89268")
+			}
+			roachNodes := c.All()
+			upgradedNodes := c.Nodes(1, 2)
+			oldNodes := c.Nodes(3, 4)
+			predV, err := clusterupgrade.PredecessorVersion(*t.BuildVersion())
+			require.NoError(t, err)
+			c.Put(ctx, t.DeprecatedWorkload(), "./workload")
+
+			// fingerprints stores the fingerprint of various versions of the restored
+			// database.
+			fingerprints := make(map[string]string)
+			u := newVersionUpgradeTest(c,
+				uploadAndStart(roachNodes, predV),
+				waitForUpgradeStep(roachNodes),
+				preventAutoUpgradeStep(1),
+				setShortJobIntervalsStep(1),
+				// Upgrade some nodes.
+				binaryUpgradeStep(upgradedNodes, clusterupgrade.MainVersion),
+
+				// Let us first test planning and executing a restore on different node
+				// versions.
+				//
+				// Case 1: plan restore    -> old node
+				//         execute restore -> upgraded node
+				//
+				// Halt job execution on older nodes.
+				disableJobAdoptionStep(c, oldNodes),
+
+				// Run a restore from an old node so that it is planned on the old node
+				// but the job is adopted on a new node.
+				planAndRunRestore(t, c, oldNodes.RandNode(), oldNodes,
+					`RESTORE DATABASE tpce FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=25000/v22.2.0/inc-count=48/?AUTH=implicit' WITH DETACHED, new_db_name='restore_old_plan_new_exec'`),
+
+				// Save fingerprint to compare against restore below.
+				saveFingerprintStep(1, fingerprints, "restore_old_plan_new_exec"),
+
+				enableJobAdoptionStep(c, oldNodes),
+
+				// Case 2: plan restore    -> upgraded node
+				//         execute restore -> old node
+				//
+				// Halt job execution on upgraded nodes.
+				disableJobAdoptionStep(c, upgradedNodes),
+
+				// Run a restore from a new node so that it is planned on the new node
+				// but the job is adopted on an old node.
+				planAndRunRestore(t, c, upgradedNodes.RandNode(), upgradedNodes,
+					`RESTORE DATABASE tpce FROM latest IN 'gs://cockroach-fixtures/backups/tpc-e/customers=25000/v22.2.0/inc-count=48/?AUTH=implicit' WITH DETACHED, new_db_name='restore_new_plan_old_exec'`),
+				saveFingerprintStep(1, fingerprints, "restore_new_plan_old_exec"),
+
+				verifyFingerprintsStep(fingerprints),
+			)
+			u.run(ctx, t)
+		},
+	})
 }
 
 var defaultHardware = hardwareSpecs{

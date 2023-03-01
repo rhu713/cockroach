@@ -219,8 +219,9 @@ func waitForJobToHaveStatus(
 	jobID jobspb.JobID,
 	expectedStatus jobs.Status,
 	nodesWithAdoptionDisabled option.NodeListOption,
+	timeout time.Duration,
 ) {
-	if err := retry.ForDuration(time.Minute*2, func() error {
+	if err := retry.ForDuration(timeout, func() error {
 		// TODO(adityamaru): This is unfortunate and can be deleted once
 		// https://github.com/cockroachdb/cockroach/pull/79666 is backported to
 		// 21.2 and the mixed version map for roachtests is bumped to the 21.2
@@ -246,7 +247,7 @@ func waitForJobToHaveStatus(
 			t.Fatalf("job failed")
 		}
 		if e, a := expectedStatus, jobs.Status(status); e != a {
-			return errors.Errorf("expected job status %s, but got %s", e, a)
+			return errors.Errorf("expected job status %s, but got %s after %v", e, a, timeout)
 		}
 		return nil
 	}); err != nil {
@@ -378,7 +379,7 @@ func registerBackupMixedVersion(r registry.Registry) {
 			var jobID jobspb.JobID
 			err := gatewayDB.QueryRow(backupStmt).Scan(&jobID)
 			require.NoError(t, err)
-			waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled)
+			waitForJobToHaveStatus(ctx, t, gatewayDB, jobID, jobs.StatusSucceeded, nodesWithAdoptionDisabled, 2*time.Minute)
 		}
 	}
 
