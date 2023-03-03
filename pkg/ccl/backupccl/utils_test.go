@@ -721,7 +721,7 @@ func requireRecoveryEvent(
 }
 
 func TestReadBadManifest(t *testing.T) {
-	path := "/Users/rhu/Downloads/oncall/fileslist-dup/backup/manifest"
+	path := "/Users/rhu/Downloads/oncall/fileslist-dup/backup/manifest2"
 
 	file, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -745,6 +745,6 @@ func TestReadBadManifest(t *testing.T) {
 	}
 
 	for _, f := range m.Files {
-		fmt.Printf("file path=%s start=%v end=%v\n", f.Path, f.Span.Key, f.Span.EndKey)
+		fmt.Printf("file path=%s start=%v end=%v entry_counts=%v\n", f.Path, f.Span.Key, f.Span.EndKey, f.EntryCounts)
 	}
 }

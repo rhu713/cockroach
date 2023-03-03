@@ -495,6 +495,7 @@ func runBackupProcessor(
 							attempts:   span.attempts,
 							lastTried:  span.lastTried,
 						}
+						log.Infof(ctx, "rh_debug: export req span_pretty=%v resumeSpan=%v ", resumeSpan.span, resumeSpan)
 					}
 
 					if backupKnobs, ok := flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
@@ -529,7 +530,6 @@ func runBackupProcessor(
 							dataSST:       file.SST,
 							revStart:      resp.StartTime,
 							atKeyBoundary: file.EndKeyTS.IsEmpty()}
-						log.Infof(ctx, "rh_debug: export response file path=%s entries=%d span=%v", file.Path, entryCounts, file.Span)
 						if span.start != spec.BackupStartTime {
 							ret.metadata.StartTime = span.start
 							ret.metadata.EndTime = span.end
@@ -540,6 +540,8 @@ func runBackupProcessor(
 							ret.completedSpans = completedSpans
 						}
 
+						log.Infof(ctx, "rh_debug: export response file path=%s entries=%d span=%v ret=%v ", file.Path, entryCounts, file.Span,
+							ret)
 						if err := sink.write(ctx, ret); err != nil {
 							return err
 						}
