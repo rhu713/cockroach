@@ -13,6 +13,7 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"io"
 	"math"
 	"math/rand"
@@ -717,4 +718,33 @@ func requireRecoveryEvent(
 		require.Equal(t, expected, actual)
 		return nil
 	})
+}
+
+func TestReadBadManifest(t *testing.T) {
+	path := "/Users/rhu/Downloads/oncall/fileslist-dup/backup/manifest"
+
+	file, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	m := backuppb.BackupManifest{}
+	err = protoutil.Unmarshal(file, &m)
+	require.NoError(t, err)
+
+	js, _ := protoreflect.MessageToJSON(&m, protoreflect.FmtFlags{})
+	fmt.Println("@@@ js", js)
+
+	//sort.Slice(m.Files, func(i, j int) bool {
+	//	return backupinfo.FileCmp(m.Files[i], m.Files[j]) < 0
+	//})
+
+	var dup []backuppb.BackupManifest_File
+	for i := range m.Files {
+		if strings.Contains(m.Files[i].Path, "844704920334336004.sst") {
+			dup = append(dup, m.Files[i])
+		}
+	}
+
+	for _, f := range m.Files {
+		fmt.Printf("file path=%s start=%v end=%v\n", f.Path, f.Span.Key, f.Span.EndKey)
+	}
 }

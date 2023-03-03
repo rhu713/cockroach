@@ -512,6 +512,7 @@ func runBackupProcessor(
 						log.Warning(ctx, "unexpected multi-file response using header.TargetBytes = 1")
 					}
 
+					log.Infof(ctx, "rh_debug: export req span=%v resp resumeSpan=%v ", req.Span(), resp.ResumeSpan)
 					for i, file := range resp.Files {
 						entryCounts := countRows(file.Exported, spec.PKIDs)
 
@@ -528,6 +529,7 @@ func runBackupProcessor(
 							dataSST:       file.SST,
 							revStart:      resp.StartTime,
 							atKeyBoundary: file.EndKeyTS.IsEmpty()}
+						log.Infof(ctx, "rh_debug: export response file path=%s entries=%d span=%v", file.Path, entryCounts, file.Span)
 						if span.start != spec.BackupStartTime {
 							ret.metadata.StartTime = span.start
 							ret.metadata.EndTime = span.end
