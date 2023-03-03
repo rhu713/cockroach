@@ -242,12 +242,22 @@ type spanAndTime struct {
 	lastTried  time.Time
 }
 
+func (s spanAndTime) String() string {
+	return fmt.Sprintf("(idx=%d span=%v firstKeyTS=%v start=%v end=%v)",
+		s.spanIdx, s.span, s.firstKeyTS, s.start, s.end)
+}
+
 type exportedSpan struct {
 	metadata       backuppb.BackupManifest_File
 	dataSST        []byte
 	revStart       hlc.Timestamp
 	completedSpans int32
 	atKeyBoundary  bool
+}
+
+func (s exportedSpan) String() string {
+	return fmt.Sprintf("(meta=%v revStart=%v completedSpans=%d atKeyBoundary=%v)",
+		s.metadata, s.revStart, s.completedSpans, s.atKeyBoundary)
 }
 
 func runBackupProcessor(
@@ -495,7 +505,7 @@ func runBackupProcessor(
 							attempts:   span.attempts,
 							lastTried:  span.lastTried,
 						}
-						log.Infof(ctx, "rh_debug: export req span_pretty=%v resumeSpan=%v ", resumeSpan.span, resumeSpan)
+						log.Infof(ctx, "rh_debug: export req span_pretty=%v resumeSpan=%v ", resumeSpan.span, resumeSpan.String())
 					}
 
 					if backupKnobs, ok := flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
@@ -541,7 +551,7 @@ func runBackupProcessor(
 						}
 
 						log.Infof(ctx, "rh_debug: export response file path=%s entries=%d span=%v ret=%v ", file.Path, entryCounts, file.Span,
-							ret)
+							ret.String())
 						if err := sink.write(ctx, ret); err != nil {
 							return err
 						}

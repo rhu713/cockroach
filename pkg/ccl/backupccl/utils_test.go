@@ -721,8 +721,9 @@ func requireRecoveryEvent(
 }
 
 func TestReadBadManifest(t *testing.T) {
-	path := "/Users/rhu/Downloads/oncall/fileslist-dup/backup/manifest2"
+	//path := "/Users/rhu/Downloads/oncall/fileslist-dup/backup/manifest2"
 
+	path := "/Users/rhu/go/src/github.com/cockroachdb/cockroach/manifest"
 	file, err := os.ReadFile(path)
 	require.NoError(t, err)
 
