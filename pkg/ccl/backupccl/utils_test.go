@@ -723,9 +723,17 @@ func requireRecoveryEvent(
 func TestReadBadManifest(t *testing.T) {
 	//path := "/Users/rhu/Downloads/oncall/fileslist-dup/backup/manifest2"
 
-	path := "/Users/rhu/go/src/github.com/cockroachdb/cockroach/manifest"
+	path := "/Users/rhu/go/src/github.com/cockroachdb/cockroach/BACKUP_MANIFEST"
 	file, err := os.ReadFile(path)
 	require.NoError(t, err)
+
+	if backupinfo.IsGZipped(file) {
+		descBytes, err := backupinfo.DecompressData(context.Background(), nil, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file = descBytes
+	}
 
 	m := backuppb.BackupManifest{}
 	err = protoutil.Unmarshal(file, &m)
