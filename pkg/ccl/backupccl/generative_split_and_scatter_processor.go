@@ -10,6 +10,7 @@ package backupccl
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupencryption"
@@ -31,6 +32,14 @@ import (
 )
 
 const generativeSplitAndScatterProcessorName = "generativeSplitAndScatter"
+
+var splitAndScatterDoneChannelSize = settings.RegisterIntSetting(
+	settings.TenantWritable,
+	"bulkio.restore.split_and_scatter_done_channel_size",
+	"size of the channel that holds the restore spans that have finished split and scattering",
+	1000,
+	settings.PositiveInt,
+)
 
 var generativeSplitAndScatterOutputTypes = []*types.T{
 	types.Bytes, // Span key for the range router
@@ -127,9 +136,8 @@ func newGenerativeSplitAndScatterProcessor(
 		output:                       output,
 		chunkSplitAndScatterers:      chunkSplitAndScatterers,
 		chunkEntrySplitAndScatterers: chunkEntrySplitAndScatterers,
-		// Large enough so that it never blocks.
-		doneScatterCh:     make(chan entryNode, spec.NumEntries),
-		routingDatumCache: make(map[roachpb.NodeID]rowenc.EncDatum),
+		doneScatterCh:                make(chan entryNode, splitAndScatterDoneChannelSize.Get(&flowCtx.Cfg.Settings.SV)),
+		routingDatumCache:            make(map[roachpb.NodeID]rowenc.EncDatum),
 	}
 	if err := ssp.Init(ssp, post, generativeSplitAndScatterOutputTypes, flowCtx, processorID, output, nil, /* memMonitor */
 		execinfra.ProcStateOpts{
