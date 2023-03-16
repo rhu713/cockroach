@@ -171,6 +171,7 @@ go_test(
         "backup_test.go",
         "bench_covering_test.go",
         "bench_test.go",
+        "bench_restore_data_processor_test.go",
         "create_scheduled_backup_test.go",
         "datadriven_test.go",
         "file_sst_sink_test.go",
