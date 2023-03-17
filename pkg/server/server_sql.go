@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/blobs/blobspb"
+	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/cloud/externalconn"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -636,6 +637,9 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 
 	backfillMemoryMonitor := execinfra.NewMonitor(ctx, bulkMemoryMonitor, "backfill-mon")
 	backupMemoryMonitor := execinfra.NewMonitor(ctx, bulkMemoryMonitor, "backup-mon")
+	restoreMemoryMonitor := mon.NewMonitorInheritWithLimit("restore-mon", backupccl.RestoreMemLimit(cfg.MemoryPoolSize),
+		bulkMemoryMonitor)
+	restoreMemoryMonitor.StartNoReserved(ctx, bulkMemoryMonitor)
 
 	serverCacheMemoryMonitor := mon.NewMonitorInheritWithLimit(
 		"server-cache-mon", 0 /* limit */, rootSQLMemoryMonitor,
@@ -750,6 +754,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		ParentDiskMonitor: cfg.TempStorageConfig.Mon,
 		BackfillerMonitor: backfillMemoryMonitor,
 		BackupMonitor:     backupMemoryMonitor,
+		RestoreMonitor:    restoreMemoryMonitor,
 		BulkSenderLimiter: bulkSenderLimiter,
 
 		ParentMemoryMonitor: rootSQLMemoryMonitor,

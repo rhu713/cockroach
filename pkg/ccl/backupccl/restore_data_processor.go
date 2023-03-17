@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	bulkutil "github.com/cockroachdb/cockroach/pkg/util/bulk"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -45,6 +46,11 @@ import (
 	"github.com/cockroachdb/logtags"
 	gogotypes "github.com/gogo/protobuf/types"
 )
+
+// restoreMemFraction is the maximum percentage of the SQL memory pool that
+// could be used by restore. This can be overridden by environment variable.
+var restoreMemFraction = envutil.EnvOrDefaultFloat64("COCKROACH_RESTORE_MEM_FRACTION",
+	0.5)
 
 // Progress is streamed to the coordinator through metadata.
 var restoreDataOutputTypes = []*types.T{}
@@ -172,8 +178,8 @@ func newRestoreDataProcessor(
 	rd.sstMemQuotaPool = quotapool.NewIntPool("restore-processor-sst-mem", 0)
 	if spec.MemoryMonitorSSTs {
 		limit := restorePerProcessorMemoryLimit.Get(&flowCtx.EvalCtx.Settings.SV)
-		rd.mon = mon.NewMonitorInheritWithLimit("restore-processor-mon", limit, flowCtx.Cfg.BackupMonitor)
-		rd.mon.Start(ctx, flowCtx.Cfg.BackupMonitor, mon.NewStandaloneBudget(limit))
+		rd.mon = mon.NewMonitorInheritWithLimit("restore-processor-mon", limit, flowCtx.Cfg.RestoreMonitor)
+		rd.mon.StartNoReserved(ctx, flowCtx.Cfg.RestoreMonitor)
 		mem := rd.mon.MakeBoundAccount()
 		mem.Mu = &syncutil.Mutex{}
 		rd.mem = &mem
@@ -512,6 +518,7 @@ func (rd *restoreDataProcessor) runRestoreWorkers(
 			fmt.Sprintf("%s-worker-%d-aggregator", restoreDataProcName, worker), rd.EvalCtx.Tracer)
 		defer agg.Close()
 
+		ssts := ssts
 		workerSSTs := workerSSTChannels[worker]
 		var sstIter mergedSST
 		var ok bool
@@ -858,6 +865,12 @@ func (b *sstBatcherNoop) Close(ctx context.Context) {
 // GetSummary returns this batcher's total added rows/bytes/etc.
 func (b *sstBatcherNoop) GetSummary() kvpb.BulkOpSummary {
 	return b.totalRows.BulkOpSummary
+}
+
+// RestoreMemLimit returns the limit in bytes of memory that can be used by
+// restore.
+func RestoreMemLimit(sqlMemoryPool int64) int64 {
+	return int64(float64(sqlMemoryPool) * restoreMemFraction)
 }
 
 func init() {
