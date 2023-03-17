@@ -301,6 +301,7 @@ func runGenerativeSplitAndScatter(
 			spec.TargetSize,
 			restoreSpanEntriesCh,
 			spec.UseSimpleImportSpans,
+			"rh_debug: gssp",
 		)
 	})
 

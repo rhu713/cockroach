@@ -94,7 +94,7 @@ func BenchmarkRestoreEntryCover(b *testing.B) {
 											g.GoCtx(func(ctx context.Context) error {
 												defer close(spanCh)
 												return generateAndSendImportSpans(ctx, backups[numBackups-1].Spans, backups,
-													layerToBackupManifestFileIterFactory, nil, introducedSpanFrontier, nil, 0, spanCh, false)
+													layerToBackupManifestFileIterFactory, nil, introducedSpanFrontier, nil, 0, spanCh, false, "")
 											})
 
 											var cov []execinfrapb.RestoreSpanEntry

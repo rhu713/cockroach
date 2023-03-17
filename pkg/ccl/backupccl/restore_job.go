@@ -312,7 +312,7 @@ func restore(
 
 	targetSize := targetRestoreSpanSize.Get(&execCtx.ExecCfg().Settings.SV)
 	countSpansCh := make(chan execinfrapb.RestoreSpanEntry, 1000)
-	genSpan := func(ctx context.Context, spanCh chan execinfrapb.RestoreSpanEntry) error {
+	genSpan := func(ctx context.Context, spanCh chan execinfrapb.RestoreSpanEntry, logPrefix string) error {
 		defer close(spanCh)
 		return generateAndSendImportSpans(
 			ctx,
@@ -325,6 +325,7 @@ func restore(
 			targetSize,
 			spanCh,
 			simpleImportSpans,
+			logPrefix,
 		)
 	}
 
@@ -339,7 +340,7 @@ func restore(
 	}
 	countTasks = append(countTasks, spanCountTask)
 	countTasks = append(countTasks, func(ctx context.Context) error {
-		return genSpan(ctx, countSpansCh)
+		return genSpan(ctx, countSpansCh, "")
 	})
 	if err := ctxgroup.GoAndWait(restoreCtx, countTasks...); err != nil {
 		return emptyRowCount, errors.Wrapf(err, "counting number of import spans")
@@ -432,7 +433,7 @@ func restore(
 	}
 	tasks = append(tasks, generativeCheckpointLoop)
 	tasks = append(tasks, func(ctx context.Context) error {
-		return genSpan(ctx, importSpanCh)
+		return genSpan(ctx, importSpanCh, "rh_debug: restore_job")
 	})
 
 	runRestore := func(ctx context.Context) error {

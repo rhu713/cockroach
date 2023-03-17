@@ -11,7 +11,9 @@ package backupccl
 import (
 	"container/heap"
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"sort"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupinfo"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backuppb"
@@ -315,6 +317,7 @@ func generateAndSendImportSpans(
 	targetSize int64,
 	spanCh chan execinfrapb.RestoreSpanEntry,
 	useSimpleImportSpans bool,
+	logPrefix string,
 ) error {
 	if useSimpleImportSpans {
 		importSpans, err := makeSimpleImportSpans(ctx, requiredSpans, backups, layerToBackupManifestFileIterFactory, backupLocalityMap, introducedSpanFrontier, lowWaterMark, targetSize)
@@ -366,6 +369,16 @@ func generateAndSendImportSpans(
 		}
 
 		if len(entry.Files) > 0 {
+			if logPrefix != "" {
+
+				var paths []string
+				for _, f := range entry.Files {
+					paths = append(paths, f.Path)
+				}
+
+				log.Infof(ctx, "%s: cover flush sp=%v files=[%s]", logPrefix, entry.Span, strings.Join(paths, ","))
+			}
+
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -422,6 +435,9 @@ func generateAndSendImportSpans(
 			}
 
 			key := startEndKeyIt.value()
+			if logPrefix != "" {
+				log.Infof(ctx, "%s: startEndKeyIt key=%v", logPrefix, key)
+			}
 			if span.Key.Compare(key) >= 0 {
 				startEndKeyIt.next()
 				continue
@@ -460,6 +476,7 @@ func generateAndSendImportSpans(
 				filesByLayer = append(filesByLayer, newFilesByLayer[layer])
 			}
 
+			// TODO: can think about moving this forward?
 			for layer := range covFilesByLayer {
 				for _, file := range covFilesByLayer[layer] {
 					sz := file.EntryCounts.DataSize
