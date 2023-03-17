@@ -35,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	bulkutil "github.com/cockroachdb/cockroach/pkg/util/bulk"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -46,11 +45,6 @@ import (
 	"github.com/cockroachdb/logtags"
 	gogotypes "github.com/gogo/protobuf/types"
 )
-
-// restoreMemFraction is the maximum percentage of the SQL memory pool that
-// could be used by restore. This can be overridden by environment variable.
-var restoreMemFraction = envutil.EnvOrDefaultFloat64("COCKROACH_RESTORE_MEM_FRACTION",
-	0.5)
 
 // Progress is streamed to the coordinator through metadata.
 var restoreDataOutputTypes = []*types.T{}
@@ -865,12 +859,6 @@ func (b *sstBatcherNoop) Close(ctx context.Context) {
 // GetSummary returns this batcher's total added rows/bytes/etc.
 func (b *sstBatcherNoop) GetSummary() kvpb.BulkOpSummary {
 	return b.totalRows.BulkOpSummary
-}
-
-// RestoreMemLimit returns the limit in bytes of memory that can be used by
-// restore.
-func RestoreMemLimit(sqlMemoryPool int64) int64 {
-	return int64(float64(sqlMemoryPool) * restoreMemFraction)
 }
 
 func init() {

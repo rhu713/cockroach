@@ -87,7 +87,6 @@ go_library(
         "//pkg/blobs",
         "//pkg/blobs/blobspb",
         "//pkg/build",
-        "//pkg/ccl/backupccl",
         "//pkg/cloud",
         "//pkg/cloud/cloudpb",
         "//pkg/cloud/externalconn",
