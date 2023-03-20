@@ -485,6 +485,28 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 			{Span: c.sp("l", "m"), Files: c.paths("9")},
 		}), reduce(coverIntroduced))
 	})
+
+	t.Run("resume-from-checkpoint", func(t *testing.T) {
+
+		completedSpans := []roachpb.Span{
+			c.sp("a", "b"),
+		}
+		frontier, err := spanUtils.MakeFrontierAt(completedSpanTime, completedSpans...)
+		require.NoError(t, err)
+
+		cover, err := makeImportSpans(
+			ctx,
+			spans,
+			backups,
+			layerToIterFactory,
+			noSpanTargetSize,
+			emptySpanFrontier,
+			persistFrontier(frontier, 0),
+			false,
+		)
+		require.NoError(t, err)
+
+	})
 }
 
 func TestFileSpanStartKeyIterator(t *testing.T) {
