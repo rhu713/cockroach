@@ -287,11 +287,16 @@ func (g *gcsStorage) ReadFileAt(
 	sp.SetTag("path", attribute.StringValue(path.Join(g.prefix, basename)))
 
 	r := cloud.NewResumingReader(ctx,
-		func(ctx context.Context, pos int64) (io.ReadCloser, error) {
-			return g.bucket.Object(object).NewRangeReader(ctx, pos, -1)
+		func(ctx context.Context, pos int64) (io.ReadCloser, int64, error) {
+			r, err := g.bucket.Object(object).NewRangeReader(ctx, pos, -1)
+			if err != nil {
+				return nil, 0, err
+			}
+			return r, r.Attrs.Size, nil
 		}, // opener
 		nil, //  reader
 		offset,
+		0, // size
 		object,
 		cloud.ResumingReaderRetryOnErrFnForSettings(ctx, g.settings),
 		nil, // errFn

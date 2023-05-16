@@ -791,14 +791,14 @@ func (s *s3Storage) ReadFileAt(
 			size = *stream.ContentLength
 		}
 	}
-	opener := func(ctx context.Context, pos int64) (io.ReadCloser, error) {
+	opener := func(ctx context.Context, pos int64) (io.ReadCloser, int64, error) {
 		s, err := s.openStreamAt(ctx, basename, pos)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		return s.Body, nil
+		return s.Body, size, nil
 	}
-	return cloud.NewResumingReader(ctx, opener, stream.Body, offset, path,
+	return cloud.NewResumingReader(ctx, opener, stream.Body, offset, size, path,
 		cloud.ResumingReaderRetryOnErrFnForSettings(ctx, s.settings), s3ErrDelay), size, nil
 }
 

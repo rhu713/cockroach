@@ -419,3 +419,51 @@ func TestCompressedGCS(t *testing.T) {
 
 	require.Equal(t, string(content1), string(content2))
 }
+
+// TestReadFileAtReturnsSize tests that ReadFileAt returns
+// a cloud.ResumingReader that contains the size of the file.
+func TestReadFileAtReturnsSize(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	if !cloudtestutils.IsImplicitAuthConfigured() {
+		skip.IgnoreLint(t, "implicit auth is not configured")
+	}
+
+	bucket := os.Getenv("GOOGLE_BUCKET")
+	if bucket == "" {
+		skip.IgnoreLint(t, "GOOGLE_BUCKET env var must be set")
+	}
+
+	user := username.RootUserName()
+	ctx := context.Background()
+	testSettings := cluster.MakeTestingClusterSettings()
+	file := "testfile"
+	data := []byte("hello world")
+
+	gsURI := fmt.Sprintf("gs://%s/%s?AUTH=implicit", bucket, "read-file-at-returns-size")
+	conf, err := cloud.ExternalStorageConfFromURI(gsURI, user)
+	require.NoError(t, err)
+	args := cloud.ExternalStorageContext{
+		IOConf:          base.ExternalIODirConfig{},
+		Settings:        testSettings,
+		DB:              nil,
+		Options:         nil,
+		Limiters:        nil,
+		MetricsRecorder: cloud.NilMetrics,
+	}
+	s, err := makeGCSStorage(ctx, args, conf)
+	require.NoError(t, err)
+
+	w, err := s.Writer(ctx, file)
+	require.NoError(t, err)
+
+	_, err = w.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	reader, _, err := s.ReadFileAt(ctx, file, 1)
+	require.NoError(t, err)
+
+	rr, ok := reader.(*cloud.ResumingReader)
+	require.True(t, ok)
+	require.Equal(t, int64(len(data)), rr.Size)
+}
