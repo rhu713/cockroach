@@ -1594,6 +1594,9 @@ func updateBackupDetails(
 	if encryptionOptions == nil {
 		encryptionOptions, encryptionInfo, err = backupencryption.MakeNewEncryptionOptions(ctx, *details.EncryptionOptions, kmsEnv)
 		if err != nil {
+
+			// TODO: handle KMS metric here.
+
 			return jobspb.BackupDetails{}, err
 		}
 	}
