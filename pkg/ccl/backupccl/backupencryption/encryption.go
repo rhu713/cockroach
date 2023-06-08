@@ -277,7 +277,7 @@ func GetEncryptedDataKeyFromURI(
 	}
 	encryptedDataKey, err := kms.Encrypt(ctx, plaintextDataKey)
 	if err != nil {
-		return "", nil, &cloud.KMSError{Cause: errors.Wrapf(err, "failed to encrypt data key for KMS scheme %s",
+		return "", nil, &cloud.KMSInaccessibleError{Cause: errors.Wrapf(err, "failed to encrypt data key for KMS scheme %s",
 			kmsURL.Scheme)}
 	}
 

@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
@@ -590,4 +591,69 @@ func CheckNoPermission(
 func IsImplicitAuthConfigured() bool {
 	credentials := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
 	return credentials != ""
+}
+
+func RequireSuccessfulKMS(ctx context.Context, t *testing.T, uri string) {
+	data := []byte("test123")
+	k, err := cloud.KMSFromURI(ctx, uri, &cloud.TestKMSEnv{
+		Settings:         cluster.MakeTestingClusterSettings(),
+		ExternalIOConfig: &base.ExternalIODirConfig{},
+	})
+	require.NoError(t, err)
+	defer k.Close()
+
+	encData, err := k.Encrypt(ctx, data)
+	require.NoError(t, err)
+
+	decData, err := k.Decrypt(ctx, encData)
+	require.NoError(t, err)
+
+	require.Equal(t, data, decData)
+}
+
+func RequireKMSInaccessibleErrorContaining(
+	ctx context.Context, t *testing.T, uri string, errRE string,
+) {
+	data := []byte("test123")
+	k, err := cloud.KMSFromURI(ctx, uri, &cloud.TestKMSEnv{
+		Settings:         cluster.MakeTestingClusterSettings(),
+		ExternalIOConfig: &base.ExternalIODirConfig{},
+	})
+	require.NoError(t, err)
+	defer k.Close()
+
+	_, err = k.Encrypt(ctx, data)
+	fmt.Println("@@@ err enc", err)
+	require.True(t, errors.HasType(err, &cloud.KMSInaccessibleError{}), "error not of type KMSInaccessibleError")
+	if !testutils.IsError(err, errRE) {
+		t.Fatalf("expected error '%s', got: %s", errRE, err)
+	}
+
+	_, err = k.Decrypt(ctx, data)
+	fmt.Println("@@@ err dec", err)
+	require.True(t, errors.HasType(err, &cloud.KMSInaccessibleError{}), "error not of type KMSInaccessibleError")
+	if !testutils.IsError(err, errRE) {
+		t.Fatalf("expected error '%s', got: %s", errRE, err)
+	}
+}
+
+func RequireKMSInaccessibleErrorContainingWithInputs(
+	ctx context.Context, t *testing.T, uri string, errSubstr string, data []byte, encData []byte,
+) {
+	k, err := cloud.KMSFromURI(ctx, uri, &cloud.TestKMSEnv{
+		Settings:         cluster.MakeTestingClusterSettings(),
+		ExternalIOConfig: &base.ExternalIODirConfig{},
+	})
+	require.NoError(t, err)
+	defer k.Close()
+
+	_, err = k.Encrypt(ctx, data)
+	fmt.Println("@@@ err enc", err)
+	require.True(t, errors.HasType(err, &cloud.KMSInaccessibleError{}), "error not of type KMSInaccessibleError")
+	require.ErrorContains(t, err, errSubstr)
+
+	_, err = k.Decrypt(ctx, encData)
+	fmt.Println("@@@ err dec", err)
+	require.True(t, errors.HasType(err, &cloud.KMSInaccessibleError{}), "error not of type KMSInaccessibleError")
+	require.ErrorContains(t, err, errSubstr)
 }

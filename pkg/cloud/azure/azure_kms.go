@@ -183,7 +183,7 @@ func MakeAzureKMS(ctx context.Context, uri string, env cloud.KMSEnv) (cloud.KMS,
 
 	client, err := kms.NewClient(u.String(), credential, nil)
 	if err != nil {
-		return nil, &cloud.KMSError{Cause: errors.Wrap(err, "azure kms vault client")}
+		return nil, &cloud.KMSInaccessibleError{Cause: errors.Wrap(err, "azure kms vault client")}
 	}
 
 	keyTokens := strings.Split(strings.TrimPrefix(kmsURI.Path, "/"), "/")
@@ -208,7 +208,7 @@ func (k *azureKMS) Encrypt(ctx context.Context, data []byte) ([]byte, error) {
 		Algorithm: &encryptionAlgorithm,
 	}, nil)
 	if err != nil {
-		return nil, &cloud.KMSError{Cause: err}
+		return nil, &cloud.KMSInaccessibleError{Cause: err}
 	}
 	return val.Result, nil
 }
@@ -219,7 +219,7 @@ func (k *azureKMS) Decrypt(ctx context.Context, data []byte) ([]byte, error) {
 		Algorithm: &encryptionAlgorithm,
 	}, nil)
 	if err != nil {
-		return nil, &cloud.KMSError{Cause: err}
+		return nil, &cloud.KMSInaccessibleError{Cause: err}
 	}
 	return val.Result, nil
 }

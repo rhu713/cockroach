@@ -192,7 +192,7 @@ func MakeAWSKMS(ctx context.Context, uri string, env cloud.KMSEnv) (cloud.KMS, e
 
 	sess, err := session.NewSessionWithOptions(opts)
 	if err != nil {
-		return nil, &cloud.KMSError{Cause: errors.Wrap(err, "new aws session")}
+		return nil, &cloud.KMSInaccessibleError{Cause: errors.Wrap(err, "new aws session")}
 	}
 
 	if kmsURIParams.roleProvider != (roleProvider{}) {
@@ -209,7 +209,7 @@ func MakeAWSKMS(ctx context.Context, uri string, env cloud.KMSEnv) (cloud.KMS, e
 
 			sess, err = session.NewSessionWithOptions(opts)
 			if err != nil {
-				return nil, &cloud.KMSError{Cause: errors.Wrap(err, "session with intermediate credentials")}
+				return nil, &cloud.KMSInaccessibleError{Cause: errors.Wrap(err, "session with intermediate credentials")}
 			}
 		}
 
@@ -217,7 +217,7 @@ func MakeAWSKMS(ctx context.Context, uri string, env cloud.KMSEnv) (cloud.KMS, e
 		opts.Config.Credentials = creds
 		sess, err = session.NewSessionWithOptions(opts)
 		if err != nil {
-			return nil, &cloud.KMSError{Cause: errors.Wrap(err, "session with assume role credentials")}
+			return nil, &cloud.KMSInaccessibleError{Cause: errors.Wrap(err, "session with assume role credentials")}
 		}
 	}
 
@@ -265,7 +265,7 @@ func (k *awsKMS) Encrypt(ctx context.Context, data []byte) ([]byte, error) {
 
 	encryptOutput, err := k.kms.Encrypt(encryptInput)
 	if err != nil {
-		return nil, &cloud.KMSError{Cause: err}
+		return nil, &cloud.KMSInaccessibleError{Cause: err}
 	}
 
 	return encryptOutput.CiphertextBlob, nil
@@ -280,7 +280,7 @@ func (k *awsKMS) Decrypt(ctx context.Context, data []byte) ([]byte, error) {
 
 	decryptOutput, err := k.kms.Decrypt(decryptInput)
 	if err != nil {
-		return nil, &cloud.KMSError{Cause: err}
+		return nil, &cloud.KMSInaccessibleError{Cause: err}
 	}
 
 	return decryptOutput.Plaintext, nil

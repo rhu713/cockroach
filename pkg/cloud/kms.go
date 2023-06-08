@@ -52,12 +52,12 @@ type KMSFromURIFactory func(ctx context.Context, uri string, env KMSEnv) (KMS, e
 // Mapping from KMS scheme to its registered factory method.
 var kmsFactoryMap = make(map[string]KMSFromURIFactory)
 
-type KMSError struct {
+type KMSInaccessibleError struct {
 	Cause error
 }
 
-func (e *KMSError) Error() string {
-	return fmt.Sprintf("KMS error: %s", e.Cause)
+func (e *KMSInaccessibleError) Error() string {
+	return fmt.Sprintf("KMS inaccessible error: %s", e.Cause)
 }
 
 // RegisterKMSFromURIFactory is used by every concrete KMS implementation to
