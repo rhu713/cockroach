@@ -174,6 +174,68 @@ func ExternalSSTReader(
 	return storage.NewSSTIterator(readerLevels, iterOpts, true /* forwardOnly */)
 }
 
+func ExternalSSTReader2(
+	ctx context.Context,
+	storeFiles []StoreFile,
+	encryption *kvpb.FileEncryptionOptions,
+	iterOpts storage.IterOptions,
+) (storage.MVCCIterator, error) {
+	// TODO(jackson): Change the interface to accept a two-dimensional
+	// [][]StoreFiles slice, and propagate that structure to
+	// NewSSTIterator.
+
+	remoteCacheSize := remoteSSTSuffixCacheSize.Get(&storeFiles[0].Store.Settings().SV)
+	readerLevels := make([][]sstable.ReadableFile, 0, len(storeFiles))
+
+	for _, sf := range storeFiles {
+		// prevent capturing the loop variables by reference when defining openAt below.
+		filePath := sf.FilePath
+		store := sf.Store
+
+		f, sz, err := getFileWithRetry(ctx, filePath, store)
+		if err != nil {
+			return nil, err
+		}
+
+		raw := &sstReader{
+			ctx:  ctx,
+			sz:   sizeStat(sz),
+			body: f,
+			openAt: func(offset int64) (ioctx.ReadCloserCtx, error) {
+				reader, _, err := store.ReadFile(ctx, filePath, cloud.ReadOptions{
+					Offset:     offset,
+					NoFileSize: true,
+				})
+				return reader, err
+			},
+		}
+
+		var reader sstable.ReadableFile
+
+		if encryption != nil {
+			r, err := decryptingReader(raw, encryption.Key)
+			if err != nil {
+				f.Close(ctx)
+				return nil, err
+			}
+			reader = r
+		} else {
+			// We only explicitly buffer the suffix of the file when not decrypting as
+			// the decrypting reader has its own internal block buffer.
+			if err := raw.readAndCacheSuffix(remoteCacheSize); err != nil {
+				f.Close(ctx)
+				return nil, err
+			}
+			reader = raw
+		}
+		readerLevels = append(readerLevels, []sstable.ReadableFile{reader})
+	}
+	// NB: It's okay to pass forwardOnly=true, because this function returns a
+	// SimpleMVCCIterator which does not provide an interface for reverse
+	// iteration.
+	return storage.NewSSTIterator(readerLevels, iterOpts, true /* forwardOnly */)
+}
+
 type sstReader struct {
 	// ctx is captured at construction time and used for I/O operations.
 	ctx    context.Context

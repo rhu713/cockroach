@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupinfo"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backuppb"
+	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/cloud/cloudpb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -28,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -1134,5 +1137,69 @@ func runTestRestoreEntryCover(t *testing.T, numBackups int, simpleImportSpans bo
 				}
 			}
 		}
+	}
+}
+
+func TestCheckSpans(t *testing.T) {
+	ctx := context.Background()
+	tc, _, _, cleanupFn := backupRestoreTestSetup(t, singleNode, 1, InitManualReplication)
+	defer cleanupFn()
+	execCfg := tc.Server(0).ExecutorConfig().(sql.ExecutorConfig)
+
+	//p := "gs://cockroach-tmp/backup_issue_22_2_fingerprint_mismatch/backups/3_22.2.6-to-current_cluster_full-planned-and-executed-on-current-incremental-planned-and-executed-on-22.2.6_JtG9/2023/06/29-221312.54?AUTH=implicit"
+	p := "gs://cockroach-tmp/backup_issue_22_2_fingerprint_mismatch/backups/3_22.2.6-to-current_cluster_full-planned-and-executed-on-current-incremental-planned-and-executed-on-22.2.6_JtG9/incrementals/2023/06/29-221312.54/20230629/222438.42?AUTH=implicit"
+
+	es, err := execCfg.DistSQLSrv.ExternalStorageFromURI(ctx,
+		p, username.RootUserName())
+	require.NoError(t, err)
+
+	manifest, _, err := backupinfo.ReadBackupManifest(ctx, nil, es, backupbase.BackupManifestName, nil, &testKMSEnv{})
+	require.NoError(t, err)
+
+	fmt.Println("@@@ size", manifest.Size())
+
+	iterOpts := storage.IterOptions{
+		KeyTypes:   storage.IterKeyTypePointsOnly,
+		LowerBound: keys.LocalMax,
+		UpperBound: keys.MaxKey,
+	}
+
+	for _, f := range manifest.Files {
+		sf := storageccl.StoreFile{
+			Store:    es,
+			FilePath: f.Path,
+		}
+
+		reader, err := storageccl.ExternalSSTReader2(ctx, []storageccl.StoreFile{sf}, nil, iterOpts)
+
+		require.NoError(t, err)
+		fmt.Println("@@@ fspan", f.Span.Key, f.Span.EndKey)
+		{
+			reader.SeekGE(storage.MVCCKey{})
+			ok, err := reader.Valid()
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			fmt.Println("@@@ startk", reader.UnsafeKey())
+
+		}
+
+		{
+			reader.SeekLT(storage.MVCCKeyMax)
+			ok, err := reader.Valid()
+			require.NoError(t, err)
+			require.True(t, ok)
+			ek := reader.UnsafeKey()
+			fmt.Println("@@@ endk", reader.UnsafeKey())
+
+			if ek.Key.Equal(f.Span.EndKey) {
+				fmt.Printf("@@@ ek %v equal to span %v\n", ek, f.Span)
+			}
+
+		}
+
+		//TODO: remove
+		// break
+
 	}
 }
