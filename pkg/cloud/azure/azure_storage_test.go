@@ -13,6 +13,7 @@ package azure
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/url"
 	"os"
 	"path"
@@ -28,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -277,11 +279,16 @@ func TestAzureStorageFileImplicitAuth(t *testing.T) {
 		return
 	}
 	testSettings := cluster.MakeTestingClusterSettings()
+	testID, err := uuid.NewV4()
+	require.NoError(t, err)
 
 	cleanup := envutil.TestSetEnv(t, "AZURE_CLIENT_ID", "")
 	defer cleanup()
 
-	cloudtestutils.CheckNoPermission(t, cfg.filePathImplicitAuth("backup-test"), username.RootUserName(),
+	testURI := cfg.filePathImplicitAuth(fmt.Sprintf("backup-test-%s", testID))
+	testListURI := cfg.filePathImplicitAuth(fmt.Sprintf("listing-test-%s", testID))
+
+	cloudtestutils.CheckNoPermission(t, testURI, username.RootUserName(),
 		nil /*db*/, testSettings)
 
 	tmpDir, cleanup2 := testutils.TempDir(t)
@@ -293,12 +300,12 @@ func TestAzureStorageFileImplicitAuth(t *testing.T) {
 	cleanup3 := envutil.TestSetEnv(t, "COCKROACH_AZURE_APPLICATION_CREDENTIALS_FILE", credFile)
 	defer cleanup3()
 
-	cloudtestutils.CheckExportStore(t, cfg.filePathImplicitAuth("backup-test"),
+	cloudtestutils.CheckExportStore(t, testURI,
 		false, username.RootUserName(),
 		nil, /* db */
 		testSettings,
 	)
-	cloudtestutils.CheckListFiles(t, cfg.filePathImplicitAuth("listing-test"),
+	cloudtestutils.CheckListFiles(t, testListURI,
 		username.RootUserName(),
 		nil, /* db */
 		testSettings,
