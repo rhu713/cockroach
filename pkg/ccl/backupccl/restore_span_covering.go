@@ -11,6 +11,7 @@ package backupccl
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupinfo"
@@ -154,6 +155,31 @@ func makeSimpleImportSpans(
 	for _, requiredSpan := range requiredSpans {
 		filteredSpans := filter.filterCompleted(requiredSpan)
 		for _, span := range filteredSpans {
+			var endKeyNotCoveredFiles []execinfrapb.RestoreFileSpec
+			var endKeyNotCoveredFilesSize int64
+
+			// makeEntry makes a RestoreSpanEntry with a span [start, end), and
+			// initially populates it from the entries in endKeyNotCoveredFiles and f.
+			makeEntry := func(start, end roachpb.Key, f *execinfrapb.RestoreFileSpec, sz int64) (execinfrapb.RestoreSpanEntry, int64) {
+				entry := execinfrapb.RestoreSpanEntry{
+					Span: roachpb.Span{Key: start, EndKey: end},
+				}
+				var entrySize int64
+
+				for _, lf := range endKeyNotCoveredFiles {
+					entry.Files = append(entry.Files, lf)
+				}
+				entrySize += endKeyNotCoveredFilesSize
+				endKeyNotCoveredFiles = endKeyNotCoveredFiles[:0]
+				endKeyNotCoveredFilesSize = 0
+
+				if f != nil {
+					entry.Files = append(entry.Files, *f)
+					entrySize += sz
+				}
+				return entry, entrySize
+			}
+
 			layersCoveredLater := filter.getLayersCoveredLater(span, backups)
 			spanCoverStart := len(cover)
 			for layer := range backups {
@@ -182,23 +208,23 @@ func makeSimpleImportSpans(
 						break
 					}
 					f := it.Value()
-					fspan := endKeyInclusiveSpan(f.Span)
+					fspan := f.Span
+					fileSpec := execinfrapb.RestoreFileSpec{Path: f.Path, Dir: backups[layer].Dir}
+					if dir, ok := backupLocalityMap[layer][f.LocalityKV]; ok {
+						fileSpec = execinfrapb.RestoreFileSpec{Path: f.Path, Dir: dir}
+					}
+
+					// Lookup the size of the file being added; if the backup didn't
+					// record a file size, just assume it is 16mb for estimating.
+					sz := f.EntryCounts.DataSize
+					if sz == 0 {
+						sz = 16 << 20
+					}
 					if sp := span.Intersect(fspan); sp.Valid() {
-						fileSpec := execinfrapb.RestoreFileSpec{Path: f.Path, Dir: backups[layer].Dir}
-						if dir, ok := backupLocalityMap[layer][f.LocalityKV]; ok {
-							fileSpec = execinfrapb.RestoreFileSpec{Path: f.Path, Dir: dir}
-						}
-
-						// Lookup the size of the file being added; if the backup didn't
-						// record a file size, just assume it is 16mb for estimating.
-						sz := f.EntryCounts.DataSize
-						if sz == 0 {
-							sz = 16 << 20
-						}
-
 						if len(cover) == spanCoverStart {
-							cover = append(cover, makeEntry(span.Key, sp.EndKey, fileSpec))
-							lastCovSpanSize = sz
+							entry, entrySize := makeEntry(span.Key, sp.EndKey, &fileSpec, sz)
+							cover = append(cover, entry)
+							lastCovSpanSize = entrySize
 						} else {
 							// If this file extends beyond the end of the last partition of the
 							// cover, either append a new partition for the uncovered span or
@@ -208,12 +234,17 @@ func makeSimpleImportSpans(
 								// exceed the target size, make a new span, otherwise extend the
 								// rightmost span to include the item.
 								if lastCovSpanSize+sz > filter.targetSize {
-									cover = append(cover, makeEntry(covEnd, sp.EndKey, fileSpec))
-									lastCovSpanSize = sz
+									entry, entrySize := makeEntry(covEnd, sp.EndKey, &fileSpec, sz)
+									cover = append(cover, entry)
+									lastCovSpanSize = entrySize
 								} else {
 									cover[len(cover)-1].Span.EndKey = sp.EndKey
 									cover[len(cover)-1].Files = append(cover[len(cover)-1].Files, fileSpec)
 									lastCovSpanSize += sz
+
+									// Empty endKeyNotCoveredFiles if we extended the cover span.
+									endKeyNotCoveredFiles = endKeyNotCoveredFiles[:0]
+									endKeyNotCoveredFilesSize = 0
 								}
 							}
 							// Now ensure the file is included in any partition in the existing
@@ -241,12 +272,33 @@ func makeSimpleImportSpans(
 								}
 							}
 						}
+
+						// Add file to endKeyNotCoveredFiles if the file span's end key is the same as
+						// the cover span's end key, as the file will point intersect with
+						// the start key of the next cover span.
+						if covEnd := cover[len(cover)-1].Span.EndKey; sp.EndKey.Compare(covEnd) == 0 {
+							endKeyNotCoveredFiles = append(endKeyNotCoveredFiles, fileSpec)
+							endKeyNotCoveredFilesSize += sz
+						}
+					} else if span.Key.Compare(fspan.EndKey) == 0 {
+						endKeyNotCoveredFiles = append(endKeyNotCoveredFiles, fileSpec)
+						endKeyNotCoveredFilesSize += sz
 					} else if span.EndKey.Compare(fspan.Key) <= 0 {
 						// If this file starts after the needed span ends, then all the files
 						// remaining do too so we're done checking files for this span.
+						fmt.Println("@@@ span", span, "fspan", fspan)
 						break
 					}
 				}
+			}
+
+			// If the span of the last cover entry does not end at span.EndKey, then
+			// it has to be the EndKey of some file span(s) that ends before the
+			// span's EndKey. Since file spans are end key inclusive, we simply extend
+			// the end key of the last cover span so it covers the end keys of these
+			// files as well.
+			if len(cover) > 0 {
+				cover[len(cover)-1].Span.EndKey = span.EndKey
 			}
 		}
 	}
@@ -277,13 +329,6 @@ func createIntroducedSpanFrontier(
 		}
 	}
 	return introducedSpanFrontier, nil
-}
-
-func makeEntry(start, end roachpb.Key, f execinfrapb.RestoreFileSpec) execinfrapb.RestoreSpanEntry {
-	return execinfrapb.RestoreSpanEntry{
-		Span:  roachpb.Span{Key: start, EndKey: end},
-		Files: []execinfrapb.RestoreFileSpec{f},
-	}
 }
 
 // spanCoveringFilter holds metadata that filters which backups and required spans are used to

@@ -381,7 +381,7 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 	c := makeCoverUtils(ctx, t, &execCfg)
 
 	// Setup and test the example in the comment of makeSimpleImportSpans.
-	spans := []roachpb.Span{c.sp("a", "f"), c.sp("f", "i"), c.sp("l", "m")}
+	spans := []roachpb.Span{c.sp("a", "f"), c.sp("f", "i"), c.sp("l", "p")}
 
 	backups := c.makeManifests([]roachpb.Spans{
 		{c.sp("a", "c"), c.sp("c", "e"), c.sp("h", "i")},
@@ -431,7 +431,7 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 			{Span: c.sp("f", "g"), Files: c.paths("6")},
 			{Span: c.sp("g", "h"), Files: c.paths("5", "6")},
 			{Span: c.sp("h", "i"), Files: c.paths("3", "5", "6", "8")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "m\x00"), Files: c.paths("9")},
 		}), reduce(cover))
 		coverSimple, err := makeImportSpans(
 			ctx,
@@ -445,11 +445,11 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 			true)
 		require.NoError(t, err)
 		require.Equal(t, reduce([]execinfrapb.RestoreSpanEntry{
-			{Span: c.sp("a", "c\x00"), Files: c.paths("1", "2", "4", "6")},
-			{Span: c.sp("c\x00", "e\x00"), Files: c.paths("2", "4", "6")},
-			{Span: c.sp("e\x00", "f"), Files: c.paths("6")},
+			{Span: c.sp("a", "c"), Files: c.paths("1", "4", "6")},
+			{Span: c.sp("c", "e"), Files: c.paths("1", "2", "4", "6")},
+			{Span: c.sp("e", "f"), Files: c.paths("2", "6")},
 			{Span: c.sp("f", "i"), Files: c.paths("3", "5", "6", "8")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "p"), Files: c.paths("9")},
 		}), reduce(coverSimple))
 	})
 
@@ -470,7 +470,7 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 			{Span: c.sp("b", "f"), Files: c.paths("2", "1", "4", "6")},
 			{Span: c.sp("f", "h"), Files: c.paths("5", "6")},
 			{Span: c.sp("h", "i"), Files: c.paths("3", "5", "6", "8")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "m\x00"), Files: c.paths("9")},
 		}), reduce(coverSized))
 
 		coverSizedSimple, err := makeImportSpans(
@@ -487,7 +487,7 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 		require.Equal(t, reduce([]execinfrapb.RestoreSpanEntry{
 			{Span: c.sp("a", "f"), Files: c.paths("1", "2", "4", "6")},
 			{Span: c.sp("f", "i"), Files: c.paths("3", "5", "6", "8")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "p"), Files: c.paths("9")},
 		}), reduce(coverSizedSimple))
 	})
 
@@ -511,7 +511,7 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 			{Span: c.sp("f", "g"), Files: c.paths("6")},
 			{Span: c.sp("g", "h"), Files: c.paths("5", "6")},
 			{Span: c.sp("h", "i"), Files: c.paths("3", "5", "6", "8")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "m\x00"), Files: c.paths("9")},
 		}), reduce(coverIntroduced))
 
 		coverIntroducedSimple, err := makeImportSpans(
@@ -528,7 +528,7 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 		require.Equal(t, reduce([]execinfrapb.RestoreSpanEntry{
 			{Span: c.sp("a", "f"), Files: c.paths("6")},
 			{Span: c.sp("f", "i"), Files: c.paths("3", "5", "6", "8")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "p"), Files: c.paths("9")},
 		}), reduce(coverIntroducedSimple))
 	})
 	t.Run("completed-spans", func(t *testing.T) {
@@ -557,8 +557,17 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 			{Span: c.sp("a", "b"), Files: c.paths("1", "6")},
 			{Span: c.sp("c", "f"), Files: c.paths("2", "1", "4", "6")},
 			{Span: c.sp("f", "g"), Files: c.paths("6")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "m\x00"), Files: c.paths("9")},
 		}), reduce(coverCompleted))
+
+		//	backup
+		//	0|     a___1___c c__2__e          h__3__i
+		//	1|         b___4___d           g____5___i
+		//	2|     a___________6______________h         j_7_k
+		//	3|                                  h_8_i              l_9_m
+		//	 keys--a---b---c---d---e---f---g---h----i---j---k---l----m------p---->
+		//
+		// spans: |-------span1-------||---span2---|           |---span3---|
 
 		coverCompletedSimple, err := makeImportSpans(
 			ctx,
@@ -573,11 +582,10 @@ func TestRestoreEntryCoverExample(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, reduce([]execinfrapb.RestoreSpanEntry{
 			{Span: c.sp("a", "b"), Files: c.paths("1", "6")},
-			{Span: c.sp("c", "c\x00"), Files: c.paths("1", "2", "4", "6")},
-			{Span: c.sp("c\x00", "e\x00"), Files: c.paths("2", "4", "6")},
-			{Span: c.sp("e\x00", "f"), Files: c.paths("6")},
+			{Span: c.sp("c", "e"), Files: c.paths("1", "2", "4", "6")},
+			{Span: c.sp("e", "f"), Files: c.paths("2", "6")},
 			{Span: c.sp("f", "g"), Files: c.paths("6")},
-			{Span: c.sp("l", "m"), Files: c.paths("9")},
+			{Span: c.sp("l", "p"), Files: c.paths("9")},
 		}), reduce(coverCompletedSimple))
 	})
 }
