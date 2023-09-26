@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/errors"
 	"math/rand"
 	"time"
 )
@@ -155,14 +156,15 @@ func startBackgroundWorkloads(
 		return nil, err
 	}
 
-	stopBank := m.GoWithCancel(func(ctx context.Context) error {
+	stopBank := workloadWithCancel(m, func(ctx context.Context) error {
 		return c.RunE(ctx, workloadNode, bankRun.String())
 	})
-	stopTPCC := m.GoWithCancel(func(ctx context.Context) error {
+
+	stopTPCC := workloadWithCancel(m, func(ctx context.Context) error {
 		return c.RunE(ctx, workloadNode, tpccRun.String())
 	})
 
-	stopSystemWriter := m.GoWithCancel(func(ctx context.Context) error {
+	stopSystemWriter := workloadWithCancel(m, func(ctx context.Context) error {
 		return testUtils.systemTableWriter(ctx, l, testRNG, dbs, tables)
 	})
 
@@ -221,5 +223,33 @@ func (u *CommonTestUtils) CloseConnections() {
 		if db != nil {
 			_ = db.Close()
 		}
+	}
+}
+
+func workloadWithCancel(m cluster.Monitor, fn func(ctx context.Context) error) func() {
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+
+	m.Go(func(ctx context.Context) error {
+		childCtx, childCancel := context.WithCancel(ctx)
+		go func() {
+			defer close(done)
+			_ = fn(childCtx)
+		}()
+
+		select {
+		case <-done:
+			return errors.New("workload unexpectedly completed before cancellation")
+		case <-ctx.Done():
+			childCancel()
+			return nil
+		case <-cancel:
+			childCancel()
+			return nil
+		}
+	})
+
+	return func() {
+		close(cancel)
 	}
 }

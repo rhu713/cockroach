@@ -1048,8 +1048,6 @@ type BackupRestoreTestDriver struct {
 	// identifiers to backups created during the test
 	currentBackupID int64
 
-	// backup collections that are created along the test
-	collections []*backupCollection
 	// databases where user data is being inserted
 	dbs    []string
 	tables [][]string
