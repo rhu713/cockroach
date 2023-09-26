@@ -17,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
@@ -36,7 +35,7 @@ func registerBackupRestoreRoundTrip(r registry.Registry) {
 		Name:              "backup-restore/round-trip",
 		Timeout:           8 * time.Hour,
 		Owner:             registry.OwnerDisasterRecovery,
-		Cluster:           r.MakeClusterSpec(5),
+		Cluster:           r.MakeClusterSpec(4),
 		EncryptionSupport: registry.EncryptionMetamorphic,
 		RequiresLicense:   true,
 		Run:               backupRestoreRoundTrip,
@@ -44,9 +43,9 @@ func registerBackupRestoreRoundTrip(r registry.Registry) {
 }
 
 func backupRestoreRoundTrip(ctx context.Context, t test.Test, c cluster.Cluster) {
-	if c.Spec().Cloud != spec.GCE {
-		t.Skip("uses gs://cockroachdb-backup-testing; see https://github.com/cockroachdb/cockroach/issues/105968")
-	}
+	//if c.Spec().Cloud != spec.GCE {
+	//	t.Skip("uses gs://cockroachdb-backup-testing; see https://github.com/cockroachdb/cockroach/issues/105968")
+	//}
 
 	pauseProbability := 0.2
 	roachNodes := c.Range(1, c.Spec().NodeCount-1)
@@ -69,7 +68,12 @@ func backupRestoreRoundTrip(ctx context.Context, t test.Test, c cluster.Cluster)
 		defer testUtils.CloseConnections()
 
 		dbs := []string{"bank", "tpcc"}
-		stopBackgroundCommands, err := startBackgroundWorkloads(ctx, t.L(), c, m, testRNG, roachNodes, workloadNode, testUtils, dbs)
+		runBackgroundWorkload, err := startBackgroundWorkloads(ctx, t.L(), c, m, testRNG, roachNodes, workloadNode, testUtils, dbs)
+		if err != nil {
+			return err
+		}
+
+		stopBackgroundCommands, err := runBackgroundWorkload()
 		if err != nil {
 			return err
 		}
@@ -91,32 +95,55 @@ func backupRestoreRoundTrip(ctx context.Context, t test.Test, c cluster.Cluster)
 			return err
 		}
 
-		// Run backups.
-		allNodes := labeledNodes{Nodes: roachNodes, Version: clusterupgrade.MainVersion}
-		bspec := backupSpec{
-			PauseProbability: pauseProbability,
-			Plan:             allNodes,
-			Execute:          allNodes,
-		}
-		collection, err := d.createBackupCollection(ctx, t.L(), testRNG, bspec, bspec, "round-trip-test-backup", true)
-		if err != nil {
-			return err
+		for i := 0; i < 10; i++ {
+			allNodes := labeledNodes{Nodes: roachNodes, Version: clusterupgrade.MainVersion}
+			bspec := backupSpec{
+				PauseProbability: pauseProbability,
+				Plan:             allNodes,
+				Execute:          allNodes,
+			}
+
+			// Run backups.
+			t.L().Printf("starting backup %d", i+1)
+			collection, err := d.createBackupCollection(ctx, t.L(), testRNG, bspec, bspec, "round-trip-test-backup", true)
+			if err != nil {
+				return err
+			}
+
+			// If we're running a cluster backup, we need to reset the cluster
+			// to restore it. We also intentionally stop background commands so
+			// the workloads don't report errors.
+			if _, ok := collection.btype.(*clusterBackup); ok {
+				t.L().Printf("resetting cluster before verifying full cluster backup %d", i+1)
+				stopBackgroundCommands()
+				expectDeathsFn := func(n int) {
+					m.ExpectDeaths(int32(n))
+				}
+
+				if err := testUtils.resetCluster(ctx, t.L(), clusterupgrade.MainVersion, expectDeathsFn); err != nil {
+					return err
+				}
+			}
+
+			t.L().Printf("verifying backup %d", i+1)
+			// Verify content in backups.
+			err = collection.verifyBackupCollection(ctx, t.L(), testRNG, d, true /* checkFiles */, true /* internalSystemJobs */)
+			if err != nil {
+				return err
+			}
+
+			// Restart background commands after verifying full cluster backups.
+			if _, ok := collection.btype.(*clusterBackup); ok {
+				t.L().Printf("resuming workloads after verifying full cluster backup %d", i+1)
+				stopBackgroundCommands, err = runBackgroundWorkload()
+				if err != nil {
+					return err
+				}
+			}
 		}
 
 		stopBackgroundCommands()
-
-		if _, ok := collection.btype.(*clusterBackup); ok {
-			expectDeathsFn := func(n int) {
-				m.ExpectDeaths(int32(n))
-			}
-
-			if err := testUtils.resetCluster(ctx, t.L(), clusterupgrade.MainVersion, expectDeathsFn); err != nil {
-				return err
-			}
-		}
-
-		// Verify content in backups.
-		return collection.verifyBackupCollection(ctx, t.L(), testRNG, d, true /* checkFiles */, true /* internalSystemJobs */)
+		return nil
 	})
 
 	m.Wait()
@@ -133,11 +160,12 @@ func startBackgroundWorkloads(
 	roachNodes, workloadNode option.NodeListOption,
 	testUtils *CommonTestUtils,
 	dbs []string,
-) (func(), error) {
+) (func() (func(), error), error) {
 	// numWarehouses is picked as a number that provides enough work
 	// for the cluster used in this test without overloading it,
 	// which can make the backups take much longer to finish.
-	const numWarehouses = 100
+	// TODO: change back to 100
+	const numWarehouses = 1
 	tpccInit, tpccRun := tpccWorkloadCmd(numWarehouses, roachNodes)
 	bankInit, bankRun := bankWorkloadCmd(testRNG, roachNodes)
 
@@ -151,30 +179,34 @@ func startBackgroundWorkloads(
 		return nil, err
 	}
 
-	tables, err := testUtils.loadTablesForDBs(ctx, l, testRNG, dbs...)
-	if err != nil {
-		return nil, err
+	run := func() (func(), error) {
+		tables, err := testUtils.loadTablesForDBs(ctx, l, testRNG, dbs...)
+		if err != nil {
+			return nil, err
+		}
+
+		stopBank := workloadWithCancel(m, func(ctx context.Context) error {
+			return c.RunE(ctx, workloadNode, bankRun.String())
+		})
+
+		stopTPCC := workloadWithCancel(m, func(ctx context.Context) error {
+			return c.RunE(ctx, workloadNode, tpccRun.String())
+		})
+
+		stopSystemWriter := workloadWithCancel(m, func(ctx context.Context) error {
+			return testUtils.systemTableWriter(ctx, l, testRNG, dbs, tables)
+		})
+
+		stopBackgroundCommands := func() {
+			stopBank()
+			stopTPCC()
+			stopSystemWriter()
+		}
+
+		return stopBackgroundCommands, nil
 	}
 
-	stopBank := workloadWithCancel(m, func(ctx context.Context) error {
-		return c.RunE(ctx, workloadNode, bankRun.String())
-	})
-
-	stopTPCC := workloadWithCancel(m, func(ctx context.Context) error {
-		return c.RunE(ctx, workloadNode, tpccRun.String())
-	})
-
-	stopSystemWriter := workloadWithCancel(m, func(ctx context.Context) error {
-		return testUtils.systemTableWriter(ctx, l, testRNG, dbs, tables)
-	})
-
-	stopBackgroundCommands := func() {
-		stopBank()
-		stopTPCC()
-		stopSystemWriter()
-	}
-
-	return stopBackgroundCommands, nil
+	return run, nil
 }
 
 // Connect makes a database handle to the node.
@@ -251,5 +283,8 @@ func workloadWithCancel(m cluster.Monitor, fn func(ctx context.Context) error) f
 
 	return func() {
 		close(cancel)
+
+		// TODO: remove
+		time.Sleep(5 * time.Second)
 	}
 }

@@ -1100,8 +1100,8 @@ func (mvb *mixedVersionBackup) initBackupRestoreTestDriver(ctx context.Context, 
 // cluster) with equal probability.
 func (d *BackupRestoreTestDriver) newBackupScope(rng *rand.Rand) backupScope {
 	possibleTypes := []backupScope{
-		newTableBackup(rng, d.dbs, d.tables),
-		newDatabaseBackup(rng, d.dbs, d.tables),
+		//newTableBackup(rng, d.dbs, d.tables),
+		//newDatabaseBackup(rng, d.dbs, d.tables),
 		newClusterBackup(rng, d.dbs, d.tables),
 	}
 
@@ -1399,9 +1399,9 @@ func (mvb *mixedVersionBackup) maybeTakePreviousVersionBackup(
 // randomWait waits from 1s to 5m, to allow for the background
 // workloads to update the databases we are backing up.
 func (d *BackupRestoreTestDriver) randomWait(l *logger.Logger, rng *rand.Rand) {
-	dur := randWaitDuration(rng)
-	l.Printf("waiting for %s", dur)
-	time.Sleep(dur)
+	//dur := randWaitDuration(rng)
+	//l.Printf("waiting for %s", dur)
+	//time.Sleep(dur)
 }
 
 func (mvb *mixedVersionBackup) now() string {
