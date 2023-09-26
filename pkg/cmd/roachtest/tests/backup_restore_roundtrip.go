@@ -54,10 +54,9 @@ func backupRestoreRoundTrip(ctx context.Context, t test.Test, c cluster.Cluster)
 	t.L().Printf("random seed: %d", seed)
 
 	// Upload binaries and start cluster.
-	uploadVersion(ctx, t, c, workloadNode, clusterupgrade.MainVersion)
-	uploadVersion(ctx, t, c, roachNodes, clusterupgrade.MainVersion)
+	uploadVersion(ctx, t, c, c.All(), clusterupgrade.MainVersion)
 
-	c.Start(ctx, t.L(), option.DefaultStartOptsNoBackups(), install.MakeClusterSettings(install.SecureOption(true)))
+	c.Start(ctx, t.L(), option.DefaultStartOptsNoBackups(), install.MakeClusterSettings(install.SecureOption(true)), roachNodes)
 	m := c.NewMonitor(ctx, roachNodes)
 
 	m.Go(func(ctx context.Context) error {
@@ -164,8 +163,7 @@ func startBackgroundWorkloads(
 	// numWarehouses is picked as a number that provides enough work
 	// for the cluster used in this test without overloading it,
 	// which can make the backups take much longer to finish.
-	// TODO: change back to 100
-	const numWarehouses = 1
+	const numWarehouses = 100
 	tpccInit, tpccRun := tpccWorkloadCmd(numWarehouses, roachNodes)
 	bankInit, bankRun := bankWorkloadCmd(testRNG, roachNodes)
 
@@ -194,7 +192,12 @@ func startBackgroundWorkloads(
 		})
 
 		stopSystemWriter := workloadWithCancel(m, func(ctx context.Context) error {
-			return testUtils.systemTableWriter(ctx, l, testRNG, dbs, tables)
+			// We use a separate RNG for the system table writer to avoid
+			// non-determinism of the RNG usage due to the time-based nature of
+			// the system writer workload. See
+			// https://github.com/cockroachdb/cockroach/blob/master/pkg/cmd/roachtest/roachtestutil/mixedversion/README.md#note-non-deterministic-use-of-the-randrand-instance
+			systemTableRNG := rand.New(rand.NewSource(testRNG.Int63()))
+			return testUtils.systemTableWriter(ctx, l, systemTableRNG, dbs, tables)
 		})
 
 		stopBackgroundCommands := func() {
@@ -283,8 +286,5 @@ func workloadWithCancel(m cluster.Monitor, fn func(ctx context.Context) error) f
 
 	return func() {
 		close(cancel)
-
-		// TODO: remove
-		time.Sleep(5 * time.Second)
 	}
 }
